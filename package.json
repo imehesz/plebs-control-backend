@@ -1,0 +1,12 @@
+{
+  "name": "plebs-control-backend",
+  "version": "1.0.0",
+  "description": "CLI prototype for Plebs Control",
+  "main": "game.js",
+  "scripts": {
+    "start": "node game.js"
+  },
+  "dependencies": {
+    "sqlite3": "^5.1.7"
+  }
+}
