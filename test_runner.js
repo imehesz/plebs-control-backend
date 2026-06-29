@@ -17,7 +17,7 @@ function fmt(n)     { return Math.round(n).toLocaleString('en-US'); }
 function pad(s, n)  { return String(s).padEnd(n); }
 function rpad(s, n) { return String(s).padStart(n); }
 
-const DISASTER_LABELS = ['Rats', 'Bad weather', 'Bandits', 'Flooding', 'Fire'];
+const DISASTER_LABELS = ['Rats', 'Bad weather', 'Gallic Horde', 'Flooding', 'Fire'];
 
 // ── Game logic (mirrors game.js exactly) ─────────────────────────────────────
 

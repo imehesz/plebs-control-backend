@@ -23,10 +23,116 @@ function arrow(curr, prev) {
 const DISASTER_EVENTS = [
   { label: 'Rats',        verb: 'infested' },
   { label: 'Bad weather', verb: 'affected' },
-  { label: 'Bandits',     verb: 'raided' },
+  { label: 'Gallic Horde', verb: 'raided' },
   { label: 'Flooding',    verb: 'damaged' },
   { label: 'Fire',        verb: 'ravaged' },
 ];
+
+const CITY_MAPS = [
+  [ // L1 Duumvir — 6 lines
+    '  .==========.',
+    '  | [] [] [] |',
+    '  |  [FORUM] |',
+    '  | [] [] [] |',
+    "  '=========='",
+    '   ~ Via Roma ~',
+  ],
+  [ // L2 Aedile — 7 lines
+    '  ##=========##',
+    '  #|[] [T] []|#',
+    '  #| [FORUM] |#',
+    '  #|[] [T] []|#',
+    '  ##=========##',
+    '    [--GATE--]',
+    '  ~ Via Augusta ~',
+  ],
+  [ // L3 Praetor — 8 lines
+    '  ##===========##',
+    '  #|[T] [] [T] |#',
+    '  #|  [FORUM]  |#',
+    '  #|  [BATHS]  |#',
+    '  #|[T] [] [T] |#',
+    '  ##===========##',
+    '    [===GATE===]',
+    '  ~ Via Trajana ~',
+  ],
+  [ // L4 Propraetor — 9 lines
+    '  ###=============###',
+    '  #|[T][T]   [T][T]|#',
+    '  #|  [CIRCUS]     |#',
+    '  #|  [FORUM]      |#',
+    '  #|  [BATHS]      |#',
+    '  #|[T][T]   [T][T]|#',
+    '  ###=============###',
+    '    [GATE]  [GATE]',
+    '  ~ Via Africanus ~',
+  ],
+  [ // L5 Consul — 10 lines
+    '  ####===============####',
+    '  #||[T][T] [] [T][T]||#',
+    '   || [C. MAXIMUS]   ||',
+    '   ||  [COLOSSEUM]   ||',
+    '   ||   [PANTHEON]   ||',
+    '   ||  [FORUM MAG.]  ||',
+    '  #||[T][T] [] [T][T]||#',
+    '  ####===============####',
+    '  [GATE]  [GATE]  [GATE]',
+    '  ~ Via Orientalis ~',
+  ],
+  [ // L6 Praefectus — 12 lines
+    '  #####===================#####',
+    '  #|||[T][T]   []   [T][T]|||#',
+    '   |||   [LIGHTHOUSE]      |||',
+    '   |||   [GREAT LIBRARY]   |||',
+    '   |||   [COLOSSEUM]       |||',
+    '   |||   [FORUM MAGNUS]    |||',
+    '   |||   [PALACE]          |||',
+    '   |||   [HARBOUR]  ~~~~~  |||',
+    '  #|||[T][T]   []   [T][T]|||#',
+    '  #####===================#####',
+    '  [GATE] [GATE] [GATE] [GATE]',
+    '  ~ Via Alexandrinus ~',
+  ],
+  [ // L7 Proconsul — 13 lines
+    '  *** CAPUT MUNDI — ROMA AETERNA ***',
+    '  #######=========================#######',
+    '  #||||[T][T][T] [] [T][T][T]||||#',
+    '   ||||  [CIRCUS MAXIMUS]      ||||',
+    '   ||||    [COLOSSEUM]         ||||',
+    '   ||||     [PANTHEON]         ||||',
+    '   ||||  [FORUM ROMANUM]       ||||',
+    '   ||||  [PALATINE HILL]       ||||',
+    '   ||||  [TIBER]  ~~~ ~~~      ||||',
+    '  #||||[T][T][T] [] [T][T][T]||||#',
+    '  #######=========================#######',
+    '  [GATE][GATE] [GATE] [GATE][GATE]',
+    '  ~ ROMA AETERNA ~',
+  ],
+];
+
+const CAESAR_ART = `
+          _______
+         /  ___  \\
+        | /  ^  \\ |
+        | \\  -  / |
+        |  \\___/  |
+         \\_______/
+            | |
+      .-----' '-----.
+     /   C A E S A R  \\
+    |    I M P E R A   |
+    |    T O R         |
+     \\_________________/
+            | |
+      ~ AVE, IMPERATOR! ~`;
+
+function displayCityMap(tier) {
+  const lines = CITY_MAPS[tier - 1];
+  if (!lines) return;
+  console.log('');
+  for (const line of lines) console.log(line);
+  console.log('');
+}
 
 const db = new sqlite3.Database(DB_PATH);
 
@@ -178,6 +284,7 @@ function displayStats(state, grainPrice, prev) {
   console.log('─'.repeat(58));
   console.log(`  👥 Population : ${fmt(state.population).padStart(12)}${arrow(state.population, p.population)}`);
   console.log(`  🌾 Grain      : ${fmt(state.grain_stored).padStart(12)}${arrow(state.grain_stored, p.grain_stored)}`);
+  console.log(`     Feed Need  : ${fmt(state.population * 20).padStart(12)}  (pop × 20)`);
   console.log(`  🪙 Treasury   : ${fmt(state.treasury).padStart(12)}${arrow(state.treasury, p.treasury)}`);
   console.log(`  📈 Mkt Price  : ${fmt(grainPrice).padStart(12)}  denarii/grain`);
   console.log(`  😠 Anger      : ${fmt(state.public_anger).padStart(12)}${arrow(state.public_anger, p.public_anger)}  ${bar(state.public_anger, 100)}`);
@@ -330,6 +437,7 @@ async function main() {
     const state = await getState();
     const grainPrice = Math.floor(Math.random() * 4) + 1;
     displayStats(state, grainPrice, prevState);
+    if (state.day_in_tier === 1) displayCityMap(state.current_tier);
     prevState = { population: state.population, grain_stored: state.grain_stored, treasury: state.treasury, public_anger: state.public_anger };
 
     if (state.population <= 0) {
@@ -434,6 +542,7 @@ async function main() {
         console.log(`  Ave, ${nextConfig.rank_title} ${state.player_name}! You now rule ${newCity}.\n`);
       } else {
         await saveState(updated);
+        console.log(CAESAR_ART);
         console.log(`\n  🏆 Ave, Caesar! ${address(updated)}, you have conquered all of Rome!`);
         console.log(`  Roma aeterna bows before you. Your name shall echo through the ages.\n`);
         break;
