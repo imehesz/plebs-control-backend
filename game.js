@@ -1,132 +1,13 @@
-const sqlite3 = require('sqlite3').verbose();
 const readline = require('readline');
 const crypto = require('crypto');
-const path = require('path');
 const { sendVerification, sendWelcome } = require('./mailer');
-
-const DB_PATH = path.join(__dirname, 'plebs_control.db');
+const { processTurn } = require('./engine');
+const { dbGet, dbRun, close } = require('./db');
 const TEST_EMAIL = 'imtest@gmail.com';
 
-const ROMAN_NUMERALS = ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X',
-  'XI', 'XII', 'XIII', 'XIV', 'XV', 'XVI', 'XVII', 'XVIII', 'XIX', 'XX'];
-function toRoman(n) { return ROMAN_NUMERALS[n] || String(n); }
+const { toRoman, randomGreeting, pick, fmt, arrow, bar, CITY_MAPS, CAESAR_ART } = require('./helpers');
+const { DISASTER_EVENTS } = require('./engine');
 
-const GREETINGS = ['Salve', 'Ave', 'Salvete', 'Bene venisti', 'Io'];
-function randomGreeting() { return GREETINGS[Math.floor(Math.random() * GREETINGS.length)]; }
-function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-function fmt(n) { return Math.round(n).toLocaleString('en-US'); }
-function arrow(curr, prev) {
-  if (prev == null) return '  ';
-  if (curr > prev) return ' ↑';
-  if (curr < prev) return ' ↓';
-  return '  ';
-}
-
-const DISASTER_EVENTS = [
-  { label: 'Rats',        verb: 'infested' },
-  { label: 'Bad weather', verb: 'affected' },
-  { label: 'Gallic Horde', verb: 'raided' },
-  { label: 'Flooding',    verb: 'damaged' },
-  { label: 'Fire',        verb: 'ravaged' },
-];
-
-const CITY_MAPS = [
-  [ // L1 Duumvir — 6 lines
-    '  .==========.',
-    '  | [] [] [] |',
-    '  |  [FORUM] |',
-    '  | [] [] [] |',
-    "  '=========='",
-    '   ~ Via Roma ~',
-  ],
-  [ // L2 Aedile — 7 lines
-    '  ##=========##',
-    '  #|[] [T] []|#',
-    '  #| [FORUM] |#',
-    '  #|[] [T] []|#',
-    '  ##=========##',
-    '    [--GATE--]',
-    '  ~ Via Augusta ~',
-  ],
-  [ // L3 Praetor — 8 lines
-    '  ##===========##',
-    '  #|[T] [] [T] |#',
-    '  #|  [FORUM]  |#',
-    '  #|  [BATHS]  |#',
-    '  #|[T] [] [T] |#',
-    '  ##===========##',
-    '    [===GATE===]',
-    '  ~ Via Trajana ~',
-  ],
-  [ // L4 Propraetor — 9 lines
-    '  ###=============###',
-    '  #|[T][T]   [T][T]|#',
-    '  #|  [CIRCUS]     |#',
-    '  #|  [FORUM]      |#',
-    '  #|  [BATHS]      |#',
-    '  #|[T][T]   [T][T]|#',
-    '  ###=============###',
-    '    [GATE]  [GATE]',
-    '  ~ Via Africanus ~',
-  ],
-  [ // L5 Consul — 10 lines
-    '  ####===============####',
-    '  #||[T][T] [] [T][T]||#',
-    '   || [C. MAXIMUS]   ||',
-    '   ||  [COLOSSEUM]   ||',
-    '   ||   [PANTHEON]   ||',
-    '   ||  [FORUM MAG.]  ||',
-    '  #||[T][T] [] [T][T]||#',
-    '  ####===============####',
-    '  [GATE]  [GATE]  [GATE]',
-    '  ~ Via Orientalis ~',
-  ],
-  [ // L6 Praefectus — 12 lines
-    '  #####===================#####',
-    '  #|||[T][T]   []   [T][T]|||#',
-    '   |||   [LIGHTHOUSE]      |||',
-    '   |||   [GREAT LIBRARY]   |||',
-    '   |||   [COLOSSEUM]       |||',
-    '   |||   [FORUM MAGNUS]    |||',
-    '   |||   [PALACE]          |||',
-    '   |||   [HARBOUR]  ~~~~~  |||',
-    '  #|||[T][T]   []   [T][T]|||#',
-    '  #####===================#####',
-    '  [GATE] [GATE] [GATE] [GATE]',
-    '  ~ Via Alexandrinus ~',
-  ],
-  [ // L7 Proconsul — 13 lines
-    '  *** CAPUT MUNDI — ROMA AETERNA ***',
-    '  #######=========================#######',
-    '  #||||[T][T][T] [] [T][T][T]||||#',
-    '   ||||  [CIRCUS MAXIMUS]      ||||',
-    '   ||||    [COLOSSEUM]         ||||',
-    '   ||||     [PANTHEON]         ||||',
-    '   ||||  [FORUM ROMANUM]       ||||',
-    '   ||||  [PALATINE HILL]       ||||',
-    '   ||||  [TIBER]  ~~~ ~~~      ||||',
-    '  #||||[T][T][T] [] [T][T][T]||||#',
-    '  #######=========================#######',
-    '  [GATE][GATE] [GATE] [GATE][GATE]',
-    '  ~ ROMA AETERNA ~',
-  ],
-];
-
-const CAESAR_ART = `
-          _______
-         /  ___  \\
-        | /  ^  \\ |
-        | \\  -  / |
-        |  \\___/  |
-         \\_______/
-            | |
-      .-----' '-----.
-     /   C A E S A R  \\
-    |    I M P E R A   |
-    |    T O R         |
-     \\_________________/
-            | |
-      ~ AVE, IMPERATOR! ~`;
 
 function displayCityMap(tier) {
   const lines = CITY_MAPS[tier - 1];
@@ -134,25 +15,6 @@ function displayCityMap(tier) {
   console.log('');
   for (const line of lines) console.log(line);
   console.log('');
-}
-
-const db = new sqlite3.Database(DB_PATH);
-
-// ------- DB helpers -------
-
-function dbGet(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
-  });
-}
-
-function dbRun(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) reject(err);
-      else resolve(this);
-    });
-  });
 }
 
 // ------- Input reader (works with both TTY and piped stdin) -------
@@ -195,6 +57,12 @@ async function migrate() {
     `ALTER TABLE player_states ADD COLUMN happy_streak INTEGER DEFAULT 0`,
     `ALTER TABLE users ADD COLUMN verification_token TEXT`,
     `ALTER TABLE users ADD COLUMN verification_expires INTEGER`,
+    `ALTER TABLE users ADD COLUMN pending_tax INTEGER`,
+    `ALTER TABLE users ADD COLUMN pending_grain INTEGER`,
+    `ALTER TABLE users ADD COLUMN pending_buy INTEGER DEFAULT 0`,
+    `ALTER TABLE users ADD COLUMN pending_tier INTEGER`,
+    `ALTER TABLE users ADD COLUMN pending_treasury INTEGER`,
+    `ALTER TABLE player_states ADD COLUMN next_grain_price INTEGER DEFAULT 2`,
   ]) {
     try { await dbRun(sql); } catch (_) { /* column already exists */ }
   }
@@ -320,11 +188,6 @@ function treasuryTaunt(treasury, name) {
 
 // ------- Display -------
 
-function bar(value, max, width = 20) {
-  const filled = Math.max(0, Math.min(width, Math.round((value / max) * width)));
-  return '[' + '█'.repeat(filled) + '░'.repeat(width - filled) + ']';
-}
-
 function displayStats(state, grainPrice, prev) {
   const p = prev || {};
   console.log('═'.repeat(58));
@@ -338,137 +201,6 @@ function displayStats(state, grainPrice, prev) {
   console.log(`  📈 Mkt Price  : ${fmt(grainPrice).padStart(12)}  denarii/grain`);
   console.log(`  😠 Anger      : ${fmt(state.public_anger).padStart(12)}${arrow(state.public_anger, p.public_anger)}  ${bar(state.public_anger, 100)}`);
   console.log('═'.repeat(58));
-}
-
-// ------- Simulation -------
-
-function populationGrowthRate(anger) {
-  if (anger <= 5)  return  0.10;
-  if (anger <= 10) return  0.05;
-  if (anger <= 20) return  0.01;
-  if (anger <= 30) return -0.05;
-  if (anger <= 40) return -0.10;
-  return -0.25;
-}
-
-function processTurn(state, taxRate, grainDistributed) {
-  let { population, treasury, grain_stored, public_anger, current_tier,
-        harvest_multiplier, disaster_risk, growth_threshold } = state;
-
-  let growth_streak = state.growth_streak || 0;
-  let happy_streak  = state.happy_streak  || 0;
-
-  let starved = 0;
-  const startPopulation = population;
-  const events = [];
-
-  // Step 1: Clamp to what's actually in the silo
-  const actualDistributed = Math.min(grainDistributed, grain_stored);
-
-  // Active Tax Base: population 10%+ above level start → reduce anger
-  if (state.start_population && population > state.start_population * 1.10) {
-    const angerBefore = public_anger;
-    public_anger = Math.max(0, public_anger - 5);
-    events.push({ type: 'boom_town', angerReduced: angerBefore - public_anger });
-  }
-
-  // 1. Grain-based Starvation / Growth (based on what player actually distributed)
-  if (actualDistributed < population * 20) {
-    const plebsFed = Math.floor(actualDistributed / 20);
-    starved = population - plebsFed;
-    population = plebsFed;
-  } else if (grain_stored > population * growth_threshold) {
-    population = Math.floor(population * 1.01);
-  }
-
-  // 2. Treasury Phase
-  treasury = treasury + taxRate * population;
-
-  // 3. Harvest Phase — deduct what was distributed, then add harvest
-  grain_stored = Math.max(0, grain_stored - actualDistributed + population * harvest_multiplier);
-
-  // 4. Public Anger Phase
-  const baseAnger = -5;
-  let taxPenalty = Math.max(0, taxRate - 10);
-  if (current_tier >= 2) taxPenalty *= 1.2;
-  const starvationPenalty = Math.min(40,
-    population > 0 ? Math.floor((starved / population) * 100) : 100);
-
-  public_anger = public_anger + baseAnger + taxPenalty + starvationPenalty;
-  public_anger = Math.max(0, Math.min(100, Math.round(public_anger)));
-
-  // 5. Anger-based Population Growth/Shrink (runs alongside grain-based system)
-  if (population > 0) {
-    const rate = populationGrowthRate(public_anger);
-    population = Math.max(0, Math.floor(population + population * rate));
-  }
-
-  // 6. Event System (Level 4+)
-  if (current_tier >= 4) {
-    if (current_tier >= 6) {
-      // Level 6-7: two independent rolls — can be both, either, or nothing
-      if (Math.random() < disaster_risk) {
-        const grainLost = Math.floor(grain_stored * disaster_risk);
-        grain_stored = Math.max(0, grain_stored - grainLost);
-        const d = pick(DISASTER_EVENTS);
-        events.push({ type: 'disaster', label: d.label, verb: d.verb, grainLost });
-      }
-      if (public_anger > 50 && Math.random() < disaster_risk) {
-        const popLost = Math.floor(population * disaster_risk);
-        population = Math.max(0, population - popLost);
-        events.push({ type: 'sickness', popLost, city: state.city_name });
-      }
-    } else {
-      // Level 4-5: single roll — sickness (if anger >50) OR disaster OR nothing
-      if (Math.random() < disaster_risk) {
-        if (public_anger > 50) {
-          const popLost = Math.floor(population * disaster_risk);
-          population = Math.max(0, population - popLost);
-          events.push({ type: 'sickness', popLost, city: state.city_name });
-        } else {
-          const grainLost = Math.floor(grain_stored * disaster_risk);
-          grain_stored = Math.max(0, grain_stored - grainLost);
-          const d = pick(DISASTER_EVENTS);
-          events.push({ type: 'disaster', label: d.label, verb: d.verb, grainLost });
-        }
-      }
-    }
-  }
-
-  // 7. Streak Updates & Triggered Events
-
-  // Growth streak — compare final population to start-of-turn population
-  if (population > startPopulation) {
-    growth_streak++;
-  } else {
-    growth_streak = 0;
-  }
-
-  // Happy streak — anger < 20 at end of turn
-  if (public_anger < 20) {
-    happy_streak++;
-  } else {
-    happy_streak = 0;
-  }
-
-  if (growth_streak >= 3) {
-    const bounty = population * 2;
-    treasury += bounty;
-    events.push({ type: 'caesars_favor', amount: bounty });
-    growth_streak = 0;
-  }
-
-  if (happy_streak >= 3) {
-    treasury -= 50000;
-    events.push({ type: 'senatorial_scrutiny' });
-    happy_streak = 0;
-  }
-
-  // Ghost Town: population collapsed by more than 85% in a single turn
-  const exiled = population > 0 && population < startPopulation * 0.15;
-
-  return { ...state, population, treasury, grain_stored, public_anger, growth_streak, happy_streak,
-           _starved: starved, _grainCapped: actualDistributed < grainDistributed, _exiled: exiled, _events: events };
 }
 
 // ------- Main loop -------
@@ -629,7 +361,7 @@ async function main() {
     await saveState(updated);
   }
 
-  db.close();
+  close();
 }
 
 // ------- Reset -------
@@ -639,7 +371,7 @@ async function resetGame(level) {
   const config = await getLevelConfig(level);
   if (!config) {
     console.error(`No level_config found for level ${level}. Check your database.`);
-    db.close();
+    close();
     process.exit(1);
   }
   const cityName = await getRandomCityForTier(level);
@@ -653,7 +385,7 @@ async function resetGame(level) {
     [cityName, config.start_population, config.start_treasury, config.start_grain, config.start_anger, TEST_EMAIL]
   );
   console.log(`Game reset to Level ${level} (${config.rank_title}).`);
-  db.close();
+  close();
 }
 
 // ------- Signup -------
@@ -679,12 +411,12 @@ async function signup(emailArg, nameArg) {
   }
 
   if (!email || !playerName) {
-    console.log('  Email and player name are required.'); db.close(); return;
+    console.log('  Email and player name are required.'); close(); return;
   }
 
   const existing = await dbGet('SELECT id FROM users WHERE email = ?', [email]);
   if (existing) {
-    console.log(`\n  A player with that email already exists.`); db.close(); return;
+    console.log(`\n  A player with that email already exists.`); close(); return;
   }
 
   const token = crypto.randomBytes(16).toString('hex');
@@ -692,15 +424,15 @@ async function signup(emailArg, nameArg) {
 
   await dbRun(
     `INSERT INTO users (email, player_name, delivery_hour_utc, verified, verification_token, verification_expires)
-     VALUES (?, ?, 12, 0, ?, ?)`,
-    [email, playerName, token, expires]
+     VALUES (?, ?, ?, 0, ?, ?)`,
+    [email, playerName, new Date().getUTCHours(), token, expires]
   );
 
   await sendVerification(email, playerName);
 
   console.log(`\n  ✅ Verification email sent to ${email}.`);
   console.log(`  Check Mailpit at http://localhost:8025\n`);
-  db.close();
+  close();
 }
 
 // ------- Verify -------
@@ -709,7 +441,7 @@ async function verify(token) {
   await migrate();
 
   if (!token) {
-    console.log('  Usage: node game.js --verify [token]'); db.close(); return;
+    console.log('  Usage: node game.js --verify [token]'); close(); return;
   }
 
   const user = await dbGet(
@@ -717,10 +449,10 @@ async function verify(token) {
   );
 
   if (!user) {
-    console.log('\n  ❌ Invalid or already-used verification token.\n'); db.close(); return;
+    console.log('\n  ❌ Invalid or already-used verification token.\n'); close(); return;
   }
   if (Date.now() > user.verification_expires) {
-    console.log('\n  ❌ This token has expired. Request a new signup.\n'); db.close(); return;
+    console.log('\n  ❌ This token has expired. Request a new signup.\n'); close(); return;
   }
 
   const cityName = await getRandomCityForTier(1);
@@ -741,7 +473,7 @@ async function verify(token) {
 
   console.log(`\n  ✅ ${user.player_name} verified! City assigned: ${cityName}`);
   console.log(`  Welcome email sent — check Mailpit at http://localhost:8025\n`);
-  db.close();
+  close();
 }
 
 // ------- Entry point -------

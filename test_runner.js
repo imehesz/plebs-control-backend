@@ -3,10 +3,8 @@
 // Usage:  node test_runner.js
 //         node test_runner.js > results.txt
 
-const sqlite3 = require('sqlite3').verbose();
-const path    = require('path');
-
-const DB_PATH = path.join(__dirname, 'plebs_control.db');
+const { processTurn } = require('./engine');
+const { dbAll, close } = require('./db');
 
 const RUNS_PER_STRATEGY = 100; // how many times each strategy is simulated per level
 
@@ -17,118 +15,15 @@ function fmt(n)     { return Math.round(n).toLocaleString('en-US'); }
 function pad(s, n)  { return String(s).padEnd(n); }
 function rpad(s, n) { return String(s).padStart(n); }
 
-const DISASTER_LABELS = ['Rats', 'Bad weather', 'Gallic Horde', 'Flooding', 'Fire'];
-
-// ── Game logic (mirrors game.js exactly) ─────────────────────────────────────
-
-function populationGrowthRate(anger) {
-  if (anger <= 5)  return  0.10;
-  if (anger <= 10) return  0.05;
-  if (anger <= 20) return  0.01;
-  if (anger <= 30) return -0.05;
-  if (anger <= 40) return -0.10;
-  return -0.25;
-}
-
-function processTurn(state, taxRate, grainDistributed) {
-  let { population, treasury, grain_stored, public_anger, current_tier,
-        harvest_multiplier, disaster_risk, growth_threshold } = state;
-
-  let growth_streak = state.growth_streak || 0;
-  let happy_streak  = state.happy_streak  || 0;
-
-  let starved = 0;
-  const startPopulation = population;
-  const events = [];
-
-  // Step 1: Clamp to what's actually in the silo
-  const actualDistributed = Math.min(grainDistributed, grain_stored);
-
-  // Active Tax Base: population 10%+ above level start → reduce anger
-  if (state.start_population && population > state.start_population * 1.10) {
-    public_anger = Math.max(0, public_anger - 5);
-    events.push(`Boom Town: -5 anger`);
-  }
-
-  // 1. Grain-based starvation / growth (based on what player actually distributed)
-  if (actualDistributed < population * 20) {
-    const plebsFed = Math.floor(actualDistributed / 20);
-    starved = population - plebsFed;
-    population = plebsFed;
-  } else if (grain_stored > population * growth_threshold) {
-    population = Math.floor(population * 1.01);
-  }
-
-  // 2. Treasury
-  treasury += taxRate * population;
-
-  // 3. Harvest — deduct what was distributed, then add harvest
-  grain_stored = Math.max(0, grain_stored - actualDistributed + population * harvest_multiplier);
-
-  // 4. Anger
-  let taxPenalty = Math.max(0, taxRate - 10);
-  if (current_tier >= 2) taxPenalty *= 1.2;
-  const starvationPenalty = Math.min(40,
-    population > 0 ? Math.floor((starved / population) * 100) : 100);
-  public_anger = Math.max(0, Math.min(100, Math.round(
-    public_anger - 5 + taxPenalty + starvationPenalty
-  )));
-
-  // 5. Anger-based population growth/shrink
-  if (population > 0) {
-    const rate = populationGrowthRate(public_anger);
-    population = Math.max(0, Math.floor(population + population * rate));
-  }
-
-  // 6. Events (Level 4+)
-  if (current_tier >= 4) {
-    if (current_tier >= 6) {
-      if (Math.random() < disaster_risk) {
-        const grainLost = Math.floor(grain_stored * disaster_risk);
-        grain_stored = Math.max(0, grain_stored - grainLost);
-        events.push(`Disaster(${pick(DISASTER_LABELS)}): -${fmt(grainLost)} grain`);
-      }
-      if (public_anger > 50 && Math.random() < disaster_risk) {
-        const popLost = Math.floor(population * disaster_risk);
-        population = Math.max(0, population - popLost);
-        events.push(`Sickness: -${fmt(popLost)} pop`);
-      }
-    } else {
-      if (Math.random() < disaster_risk) {
-        if (public_anger > 50) {
-          const popLost = Math.floor(population * disaster_risk);
-          population = Math.max(0, population - popLost);
-          events.push(`Sickness: -${fmt(popLost)} pop`);
-        } else {
-          const grainLost = Math.floor(grain_stored * disaster_risk);
-          grain_stored = Math.max(0, grain_stored - grainLost);
-          events.push(`Disaster(${pick(DISASTER_LABELS)}): -${fmt(grainLost)} grain`);
-        }
-      }
-    }
-  }
-
-  // 7. Streaks
-  if (population > startPopulation) { growth_streak++; } else { growth_streak = 0; }
-  if (public_anger < 20)            { happy_streak++;  } else { happy_streak  = 0; }
-
-  if (growth_streak >= 3) {
-    const bounty = population * 2;
-    treasury += bounty;
-    events.push(`Caesar's Favor: +${fmt(bounty)} denarii`);
-    growth_streak = 0;
-  }
-  if (happy_streak >= 3) {
-    treasury -= 50000;
-    events.push(`Senatorial Scrutiny: -50,000 denarii`);
-    happy_streak = 0;
-  }
-
-  // Ghost Town: population collapsed by more than 85% in a single turn
-  const exiled = population > 0 && population < startPopulation * 0.15;
-
-  return { ...state, population, treasury, grain_stored, public_anger,
-           growth_streak, happy_streak, _starved: starved, _exiled: exiled, _events: events };
+function eventToString(ev) {
+  if (typeof ev === 'string') return ev;
+  if (ev.type === 'boom_town')           return ev.angerReduced > 0 ? `Boom Town: -${ev.angerReduced} anger` : '';
+  if (ev.type === 'disaster')            return `${ev.label}: -${fmt(ev.grainLost)} grain`;
+  if (ev.type === 'sickness')            return `Sickness: -${fmt(ev.popLost)} pop`;
+  if (ev.type === 'caesars_favor')       return `Caesar's Favor: +${fmt(ev.amount)} denarii`;
+  if (ev.type === 'senatorial_scrutiny') return `Senatorial Scrutiny: -50,000 denarii`;
+  if (ev.type === 'roman_triumph')       return `Roman Triumph: treasury ×1.5`;
+  return JSON.stringify(ev);
 }
 
 // ── Strategies (10 total, covering all required behaviour types) ──────────────
@@ -266,7 +161,7 @@ function runSim(levelConfig, strategy) {
   // Thriving Metropolis: survived the term with population at or above the starting level
   if (state.population >= levelConfig.start_population) {
     state = { ...state, treasury: Math.floor(state.treasury * 1.5) };
-    turnLog[turnLog.length - 1].events.push(`Roman Triumph: treasury ×1.5`);
+    turnLog[turnLog.length - 1].events.push({ type: 'roman_triumph' });
   }
 
   return { outcome: 'WIN', endTurn: levelConfig.term_years, finalState: state, turnLog };
@@ -303,7 +198,7 @@ function printReport(allResults) {
       const allWin  = r._wins === RUNS_PER_STRATEGY;
       const anyWin  = r._wins > 0;
       const icon    = allWin ? '✅' : anyWin ? '🔶' : r.outcome === 'FAMINE' ? '☠️ ' : r.outcome === 'EXILE' ? '🏚️' : '⚔️ ';
-      const notable = r.turnLog.flatMap(t => t.events).slice(0, 2).join(' | ') || '—';
+      const notable = r.turnLog.flatMap(t => t.events).map(eventToString).filter(Boolean).slice(0, 2).join(' | ') || '—';
       const wfr     = `${r._wins}W/${r._famines}F/${r._revolts}R`;
       console.log(
         `  ${icon} ${pad(r.strategyName, 33)} ${rpad(wfr, 9)} avg:${r.endTurn}/${lc.term_years}  ` +
@@ -375,18 +270,11 @@ function printReport(allResults) {
   console.log(HR + '\n');
 }
 
-// ── DB + entry point ──────────────────────────────────────────────────────────
-
-function dbAll(db, sql, params = []) {
-  return new Promise((resolve, reject) =>
-    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)))
-  );
-}
+// ── Entry point ───────────────────────────────────────────────────────────────
 
 async function main() {
-  const db     = new sqlite3.Database(DB_PATH);
-  const levels = await dbAll(db, `SELECT * FROM level_config ORDER BY level_id`);
-  db.close();
+  const levels = await dbAll(`SELECT * FROM level_config ORDER BY level_id`);
+  close();
 
   const totalRuns = levels.length * STRATEGIES.length * RUNS_PER_STRATEGY;
   console.log(`\nRunning ${totalRuns} simulations (${levels.length} levels × ${STRATEGIES.length} strategies × ${RUNS_PER_STRATEGY} runs)...\n`);

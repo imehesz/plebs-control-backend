@@ -1,18 +1,7 @@
 const http = require('http');
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
-const { sendWelcome } = require('./mailer');
-
-const DB_PATH = path.join(__dirname, 'plebs_control.db');
-const PORT = 3000;
-
-const db = new sqlite3.Database(DB_PATH);
-function dbGet(sql, p = []) {
-  return new Promise((res, rej) => db.get(sql, p, (e, r) => (e ? rej(e) : res(r))));
-}
-function dbRun(sql, p = []) {
-  return new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this); }));
-}
+const { sendWelcome, sendOrderError } = require('./mailer');
+const { PORT } = require('./config');
+const { dbGet, dbRun } = require('./db');
 
 // Strip quoted reply content — drop lines starting with '>' and everything after 'On ... wrote:'
 function stripReply(text) {
@@ -47,8 +36,37 @@ async function handleAccept(user) {
      levelConfig.start_grain, levelConfig.start_anger]
   );
 
-  await sendWelcome(user.email, user.player_name, levelConfig.rank_title, cityName);
+  const hour = String(user.delivery_hour_utc).padStart(2, '0');
+  await sendWelcome(user.email, user.player_name, levelConfig.rank_title, cityName, `${hour}:00 UTC`);
   console.log(`[inbound] ACCEPT processed for ${user.email} → city: ${cityName}`);
+}
+
+async function handleNewAssignment(user) {
+  const tier = user.pending_tier;
+  const lc   = await dbGet('SELECT * FROM level_config WHERE level_id = ?', [tier]);
+  const cityRow = await dbGet(
+    'SELECT name FROM city_names WHERE tier = ? ORDER BY RANDOM() LIMIT 1', [tier]
+  );
+  const cityName = cityRow ? cityRow.name : `City`;
+  const treasury = user.pending_treasury !== null && user.pending_treasury !== undefined
+    ? user.pending_treasury
+    : lc.start_treasury;
+
+  await dbRun(
+    `UPDATE users SET current_tier = ?, day_in_tier = 1,
+     pending_tier = NULL, pending_treasury = NULL WHERE id = ?`,
+    [tier, user.id]
+  );
+  await dbRun(
+    `UPDATE player_states SET city_name = ?, population = ?, treasury = ?,
+     grain_stored = ?, public_anger = ?, growth_streak = 0, happy_streak = 0
+     WHERE user_id = ?`,
+    [cityName, lc.start_population, treasury, lc.start_grain, lc.start_anger, user.id]
+  );
+
+  const hour = String(user.delivery_hour_utc).padStart(2, '0');
+  await sendWelcome(user.email, user.player_name, lc.rank_title, cityName, `${hour}:00 UTC`);
+  console.log(`[inbound] new assignment accepted for ${user.email} → L${tier} ${cityName}`);
 }
 
 async function handleInbound(payload) {
@@ -64,6 +82,7 @@ async function handleInbound(payload) {
     return { status: 404, message: 'Unknown sender' };
   }
 
+  // First-time signup verification
   if (!user.verified && firstWord === 'ACCEPT') {
     if (Date.now() > user.verification_expires) {
       console.log(`[inbound] token expired for ${from}`);
@@ -78,19 +97,32 @@ async function handleInbound(payload) {
     return { status: 400, message: 'Expected ACCEPT' };
   }
 
+  // Verified player awaiting a new assignment
+  if (user.pending_tier && firstWord === 'ACCEPT') {
+    await handleNewAssignment(user);
+    return { status: 200, message: 'Assignment accepted' };
+  }
+
   // Verified player — parse game command (fields may be on separate lines)
   const taxMatch   = body.match(/TAX:\s*(\d+)/i);
   const grainMatch = body.match(/GRAIN:\s*(\d+)/i);
   if (!taxMatch || !grainMatch) {
     console.log(`[inbound] unrecognised command from ${from}: "${body}"`);
+    const lc = await dbGet('SELECT rank_title FROM level_config WHERE level_id = ?', [user.current_tier]);
+    await sendOrderError(user.email, user.player_name, lc ? lc.rank_title : '', body);
     return { status: 400, message: 'Could not parse TAX and GRAIN from reply' };
   }
-  const taxRate        = parseInt(taxMatch[1], 10);
-  const grainAmount    = parseInt(grainMatch[1], 10);
-  const buyMatch       = body.match(/BUY:\s*(\d+)/i);
-  const buyAmount      = buyMatch ? parseInt(buyMatch[1], 10) : 0;
-  console.log(`[inbound] orders from ${from}: TAX:${taxRate} GRAIN:${grainAmount} BUY:${buyAmount}`);
-  return { status: 200, message: 'Orders received (turn processing not yet implemented)' };
+  const taxRate   = parseInt(taxMatch[1], 10);
+  const grainAmount = parseInt(grainMatch[1], 10);
+  const buyMatch  = body.match(/BUY:\s*(\d+)/i);
+  const buyAmount = buyMatch ? parseInt(buyMatch[1], 10) : 0;
+
+  await dbRun(
+    `UPDATE users SET pending_tax = ?, pending_grain = ?, pending_buy = ? WHERE id = ?`,
+    [taxRate, grainAmount, buyAmount, user.id]
+  );
+  console.log(`[inbound] orders stored for ${from}: TAX:${taxRate} GRAIN:${grainAmount} BUY:${buyAmount}`);
+  return { status: 200, message: 'Orders received' };
 }
 
 const server = http.createServer(async (req, res) => {
