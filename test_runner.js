@@ -41,11 +41,18 @@ function processTurn(state, taxRate, grainDistributed) {
   const startPopulation = population;
   const events = [];
 
-  if (grainDistributed > grain_stored) grainDistributed = grain_stored;
+  // Step 1: Clamp to what's actually in the silo
+  const actualDistributed = Math.min(grainDistributed, grain_stored);
 
-  // 1. Grain-based starvation / growth
-  if (grain_stored < population * 20) {
-    const plebsFed = Math.floor(grain_stored / 20);
+  // Active Tax Base: population 10%+ above level start → reduce anger
+  if (state.start_population && population > state.start_population * 1.10) {
+    public_anger = Math.max(0, public_anger - 5);
+    events.push(`Boom Town: -5 anger`);
+  }
+
+  // 1. Grain-based starvation / growth (based on what player actually distributed)
+  if (actualDistributed < population * 20) {
+    const plebsFed = Math.floor(actualDistributed / 20);
     starved = population - plebsFed;
     population = plebsFed;
   } else if (grain_stored > population * growth_threshold) {
@@ -55,9 +62,8 @@ function processTurn(state, taxRate, grainDistributed) {
   // 2. Treasury
   treasury += taxRate * population;
 
-  // 3. Harvest
-  const grainConsumed = starved > 0 ? grain_stored : Math.min(grainDistributed, grain_stored);
-  grain_stored = Math.max(0, grain_stored - grainConsumed + population * harvest_multiplier);
+  // 3. Harvest — deduct what was distributed, then add harvest
+  grain_stored = Math.max(0, grain_stored - actualDistributed + population * harvest_multiplier);
 
   // 4. Anger
   let taxPenalty = Math.max(0, taxRate - 10);
@@ -118,8 +124,11 @@ function processTurn(state, taxRate, grainDistributed) {
     happy_streak = 0;
   }
 
+  // Ghost Town: population collapsed by more than 85% in a single turn
+  const exiled = population > 0 && population < startPopulation * 0.15;
+
   return { ...state, population, treasury, grain_stored, public_anger,
-           growth_streak, happy_streak, _starved: starved, _events: events };
+           growth_streak, happy_streak, _starved: starved, _exiled: exiled, _events: events };
 }
 
 // ── Strategies (10 total, covering all required behaviour types) ──────────────
@@ -204,6 +213,7 @@ const STRATEGIES = [
 function runSim(levelConfig, strategy) {
   let state = {
     population:         levelConfig.start_population,
+    start_population:   levelConfig.start_population,
     grain_stored:       levelConfig.start_grain,
     treasury:           levelConfig.start_treasury,
     public_anger:       levelConfig.start_anger,
@@ -248,8 +258,15 @@ function runSim(levelConfig, strategy) {
       events:   updated._events,
     });
 
-    if (state.population   <= 0)  return { outcome: 'FAMINE', endTurn: turn, finalState: state, turnLog };
+    if (state.population   <= 0)   return { outcome: 'FAMINE', endTurn: turn, finalState: state, turnLog };
     if (state.public_anger >= 100) return { outcome: 'REVOLT', endTurn: turn, finalState: state, turnLog };
+    if (updated._exiled)           return { outcome: 'EXILE',  endTurn: turn, finalState: state, turnLog };
+  }
+
+  // Thriving Metropolis: survived the term with population at or above the starting level
+  if (state.population >= levelConfig.start_population) {
+    state = { ...state, treasury: Math.floor(state.treasury * 1.5) };
+    turnLog[turnLog.length - 1].events.push(`Roman Triumph: treasury ×1.5`);
   }
 
   return { outcome: 'WIN', endTurn: levelConfig.term_years, finalState: state, turnLog };
@@ -273,6 +290,7 @@ function printReport(allResults) {
     const wins    = results.filter(r => r.outcome === 'WIN').length;
     const famines = results.filter(r => r.outcome === 'FAMINE').length;
     const revolts = results.filter(r => r.outcome === 'REVOLT').length;
+    const exiles  = results.filter(r => r.outcome === 'EXILE').length;
 
     console.log(`\n  Level ${lc.level_id} — ${lc.rank_title}`);
     console.log(`  Terms: ${lc.term_years} turns | Start pop: ${fmt(lc.start_population)} | ` +
@@ -284,7 +302,7 @@ function printReport(allResults) {
     for (const r of results) {
       const allWin  = r._wins === RUNS_PER_STRATEGY;
       const anyWin  = r._wins > 0;
-      const icon    = allWin ? '✅' : anyWin ? '🔶' : r.outcome === 'FAMINE' ? '☠️ ' : '⚔️ ';
+      const icon    = allWin ? '✅' : anyWin ? '🔶' : r.outcome === 'FAMINE' ? '☠️ ' : r.outcome === 'EXILE' ? '🏚️' : '⚔️ ';
       const notable = r.turnLog.flatMap(t => t.events).slice(0, 2).join(' | ') || '—';
       const wfr     = `${r._wins}W/${r._famines}F/${r._revolts}R`;
       console.log(
@@ -295,30 +313,30 @@ function printReport(allResults) {
     }
 
     console.log('  ' + hr);
-    console.log(`  ✅ ${wins} wins  ☠️  ${famines} famines  ⚔️  ${revolts} revolts  —  ${Math.round(wins / results.length * 100)}% win rate\n`);
+    console.log(`  ✅ ${wins} wins  ☠️  ${famines} famines  ⚔️  ${revolts} revolts  🏚️  ${exiles} exiles  —  ${Math.round(wins / results.length * 100)}% win rate\n`);
 
-    levelSummary.push({ level: lc.level_id, rank: lc.rank_title, wins, famines, revolts, total: results.length });
+    levelSummary.push({ level: lc.level_id, rank: lc.rank_title, wins, famines, revolts, exiles, total: results.length });
   }
 
   // ── Overall summary ──
   console.log('\n' + HR);
   console.log('  OVERALL SUMMARY BY LEVEL');
   console.log(HR);
-  console.log(`  ${'Lv'.padEnd(4)} ${'Rank'.padEnd(14)} ${'Wins'.padEnd(6)} ${'Famine'.padEnd(8)} ${'Revolt'.padEnd(8)} Win%`);
-  console.log('  ' + '─'.repeat(50));
+  console.log(`  ${'Lv'.padEnd(4)} ${'Rank'.padEnd(14)} ${'Wins'.padEnd(6)} ${'Famine'.padEnd(8)} ${'Revolt'.padEnd(8)} ${'Exile'.padEnd(7)} Win%`);
+  console.log('  ' + '─'.repeat(58));
 
-  let [tw, tf, tr, tt] = [0, 0, 0, 0];
+  let [tw, tf, tr, te, tt] = [0, 0, 0, 0, 0];
   for (const s of levelSummary) {
     console.log(
       `  ${rpad(s.level, 4)} ${pad(s.rank, 14)} ${rpad(s.wins, 6)} ${rpad(s.famines, 8)} ` +
-      `${rpad(s.revolts, 8)} ${Math.round(s.wins / s.total * 100)}%`
+      `${rpad(s.revolts, 8)} ${rpad(s.exiles, 7)} ${Math.round(s.wins / s.total * 100)}%`
     );
-    tw += s.wins; tf += s.famines; tr += s.revolts; tt += s.total;
+    tw += s.wins; tf += s.famines; tr += s.revolts; te += s.exiles; tt += s.total;
   }
-  console.log('  ' + '─'.repeat(50));
+  console.log('  ' + '─'.repeat(58));
   console.log(
     `  ${'ALL'.padEnd(4)} ${''.padEnd(14)} ${rpad(tw, 6)} ${rpad(tf, 8)} ${rpad(tr, 8)} ` +
-    `${Math.round(tw / tt * 100)}%`
+    `${rpad(te, 7)} ${Math.round(tw / tt * 100)}%`
   );
 
   // ── Strategy breakdown ──
@@ -329,21 +347,22 @@ function printReport(allResults) {
   const stratMap = {};
   for (const { results } of allResults) {
     for (const r of results) {
-      if (!stratMap[r.strategyName]) stratMap[r.strategyName] = { wins: 0, famine: 0, revolt: 0, total: 0 };
+      if (!stratMap[r.strategyName]) stratMap[r.strategyName] = { wins: 0, famine: 0, revolt: 0, exile: 0, total: 0 };
       stratMap[r.strategyName].total++;
       if (r.outcome === 'WIN')    stratMap[r.strategyName].wins++;
       if (r.outcome === 'FAMINE') stratMap[r.strategyName].famine++;
       if (r.outcome === 'REVOLT') stratMap[r.strategyName].revolt++;
+      if (r.outcome === 'EXILE')  stratMap[r.strategyName].exile++;
     }
   }
-  console.log(`  ${'Strategy'.padEnd(35)} W/F/R     ${'Win%'.padEnd(5)}  Bar`);
-  console.log('  ' + '─'.repeat(72));
+  console.log(`  ${'Strategy'.padEnd(35)} W/F/R/E     ${'Win%'.padEnd(5)}  Bar`);
+  console.log('  ' + '─'.repeat(74));
   for (const [name, s] of Object.entries(stratMap)) {
     const pct    = Math.round(s.wins / s.total * 100);
     const filled = Math.round(pct / 5);
     const bar    = '█'.repeat(filled) + '░'.repeat(20 - filled);
     console.log(
-      `  ${pad(name, 35)} ${rpad(s.wins+'/'+s.famine+'/'+s.revolt, 9)} ${rpad(pct+'%', 5)}  ${bar}`
+      `  ${pad(name, 35)} ${rpad(s.wins+'/'+s.famine+'/'+s.revolt+'/'+s.exile, 11)} ${rpad(pct+'%', 5)}  ${bar}`
     );
   }
 
@@ -351,7 +370,7 @@ function printReport(allResults) {
   console.log('  Notes:');
   console.log('  • Each simulation uses random grain price (1-4/turn) and random event rolls.');
   console.log('  • Run multiple times to average out RNG variance.');
-  console.log('  • Zero Grain Distribution never triggers starvation — watch for balance issues.');
+  console.log('  • Zero Grain Distribution triggers instant famine (turn 1) — starvation is tied to actualDistributed.');
   console.log('  • Senatorial Scrutiny (-50k) fires after 3 consecutive low-anger years.');
   console.log(HR + '\n');
 }
@@ -385,7 +404,8 @@ async function main() {
       const wins    = runs.filter(r => r.outcome === 'WIN').length;
       const famines = runs.filter(r => r.outcome === 'FAMINE').length;
       const revolts = runs.filter(r => r.outcome === 'REVOLT').length;
-      const topOutcome = wins > 0 ? 'WIN' : revolts > 0 ? 'REVOLT' : 'FAMINE';
+      const exiles  = runs.filter(r => r.outcome === 'EXILE').length;
+      const topOutcome = wins > 0 ? 'WIN' : revolts > 0 ? 'REVOLT' : exiles > 0 ? 'EXILE' : 'FAMINE';
       const avgEndTurn = Math.round(runs.reduce((s, r) => s + r.endTurn, 0) / runs.length);
       const lastRun    = runs[runs.length - 1];
 
@@ -395,12 +415,12 @@ async function main() {
         endTurn:      avgEndTurn,
         finalState:   lastRun.finalState,
         turnLog:      lastRun.turnLog,
-        _wins: wins, _famines: famines, _revolts: revolts,
+        _wins: wins, _famines: famines, _revolts: revolts, _exiles: exiles,
       });
 
-      const icon = wins === RUNS_PER_STRATEGY ? '✅' : wins > 0 ? '🔶' : revolts > 0 ? '⚔️ ' : '☠️ ';
+      const icon = wins === RUNS_PER_STRATEGY ? '✅' : wins > 0 ? '🔶' : revolts > 0 ? '⚔️ ' : exiles > 0 ? '🏚️' : '☠️ ';
       console.log(
-        `  L${lc.level_id} ${pad(strategy.name, 35)} → ${icon}  ${wins}W/${famines}F/${revolts}R ` +
+        `  L${lc.level_id} ${pad(strategy.name, 35)} → ${icon}  ${wins}W/${famines}F/${revolts}R/${exiles}E ` +
         `(avg turn ${avgEndTurn}/${lc.term_years})`
       );
     }

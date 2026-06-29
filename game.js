@@ -97,7 +97,7 @@ async function getState() {
     `SELECT u.id, u.current_tier, u.day_in_tier, u.player_name,
             ps.city_name, ps.population, ps.treasury, ps.grain_stored, ps.public_anger,
             ps.growth_streak, ps.happy_streak,
-            lc.rank_title, lc.term_years, lc.harvest_multiplier, lc.disaster_risk, lc.growth_threshold
+            lc.rank_title, lc.term_years, lc.start_population, lc.harvest_multiplier, lc.disaster_risk, lc.growth_threshold
      FROM users u
      JOIN player_states ps ON u.id = ps.user_id
      JOIN level_config lc ON u.current_tier = lc.level_id
@@ -203,19 +203,21 @@ function processTurn(state, taxRate, grainDistributed) {
   let happy_streak  = state.happy_streak  || 0;
 
   let starved = 0;
-  let grainCapped = false;
   const startPopulation = population;
   const events = [];
 
-  // Cap distribution at what's in the silo
-  if (grainDistributed > grain_stored) {
-    grainDistributed = grain_stored;
-    grainCapped = true;
+  // Step 1: Clamp to what's actually in the silo
+  const actualDistributed = Math.min(grainDistributed, grain_stored);
+
+  // Active Tax Base: population 10%+ above level start → reduce anger
+  if (state.start_population && population > state.start_population * 1.10) {
+    public_anger = Math.max(0, public_anger - 5);
+    events.push({ type: 'boom_town' });
   }
 
-  // 1. Grain-based Starvation / Growth (uses grain_stored as Total_Grain_Available)
-  if (grain_stored < population * 20) {
-    const plebsFed = Math.floor(grain_stored / 20);
+  // 1. Grain-based Starvation / Growth (based on what player actually distributed)
+  if (actualDistributed < population * 20) {
+    const plebsFed = Math.floor(actualDistributed / 20);
     starved = population - plebsFed;
     population = plebsFed;
   } else if (grain_stored > population * growth_threshold) {
@@ -225,9 +227,8 @@ function processTurn(state, taxRate, grainDistributed) {
   // 2. Treasury Phase
   treasury = treasury + taxRate * population;
 
-  // 3. Harvest Phase — all grain consumed when starving, otherwise player's input
-  const grainConsumed = starved > 0 ? grain_stored : Math.min(grainDistributed, grain_stored);
-  grain_stored = Math.max(0, grain_stored - grainConsumed + population * harvest_multiplier);
+  // 3. Harvest Phase — deduct what was distributed, then add harvest
+  grain_stored = Math.max(0, grain_stored - actualDistributed + population * harvest_multiplier);
 
   // 4. Public Anger Phase
   const baseAnger = -5;
@@ -306,8 +307,11 @@ function processTurn(state, taxRate, grainDistributed) {
     happy_streak = 0;
   }
 
+  // Ghost Town: population collapsed by more than 85% in a single turn
+  const exiled = population > 0 && population < startPopulation * 0.15;
+
   return { ...state, population, treasury, grain_stored, public_anger, growth_streak, happy_streak,
-           _starved: starved, _grainCapped: grainCapped, _events: events };
+           _starved: starved, _grainCapped: actualDistributed < grainDistributed, _exiled: exiled, _events: events };
 }
 
 // ------- Main loop -------
@@ -379,6 +383,8 @@ async function main() {
         console.log(`\n  🏛️  [Caesar's Favor] Caesar grants you a bounty of ${fmt(ev.amount)} denarii for your stewardship.`);
       } else if (ev.type === 'senatorial_scrutiny') {
         console.log(`\n  📜 [Senatorial Scrutiny] The Senate finds your lack of productivity disturbing. A fine of 50,000 denarii has been levied.`);
+      } else if (ev.type === 'boom_town') {
+        console.log(`\n  📈 [Boom Town] The city is thriving and expanding! The plebs are optimistic. (-5 Anger)`);
       }
     }
 
@@ -396,10 +402,21 @@ async function main() {
       console.log(`  ${treasuryTaunt(updated.treasury, updated.player_name)}\n`);
       break;
     }
+    if (updated._exiled) {
+      await saveState(updated);
+      console.log(`\n  💀 [Senatorial Exile] You have reduced ${updated.city_name} to a desolate ghost town. The Senate has stripped you of your rank, seized your treasury, and banished you.\n`);
+      break;
+    }
 
     // Check level completion
     if (state.day_in_tier >= state.term_years) {
       const nextConfig = await getLevelConfig(state.current_tier + 1);
+
+      // Thriving Metropolis: survived the term with population at or above the starting level
+      if (updated.population >= state.start_population) {
+        updated.treasury = Math.floor(updated.treasury * 1.5);
+        console.log(`\n  🏛️  [Roman Triumph] You not only survived, but you grew the city! Caesar has declared a Triumph in your honor. Treasury increased by 50%!`);
+      }
 
       if (nextConfig) {
         const newCity = await getRandomCityForTier(nextConfig.level_id);
