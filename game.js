@@ -20,6 +20,14 @@ function arrow(curr, prev) {
   return '  ';
 }
 
+const DISASTER_EVENTS = [
+  { label: 'Rats',        verb: 'infested' },
+  { label: 'Bad weather', verb: 'affected' },
+  { label: 'Bandits',     verb: 'raided' },
+  { label: 'Flooding',    verb: 'damaged' },
+  { label: 'Fire',        verb: 'ravaged' },
+];
+
 const db = new sqlite3.Database(DB_PATH);
 
 // ------- DB helpers -------
@@ -71,13 +79,25 @@ class LineReader {
   }
 }
 
+// ------- Migrations -------
+
+async function migrate() {
+  for (const sql of [
+    `ALTER TABLE player_states ADD COLUMN growth_streak INTEGER DEFAULT 0`,
+    `ALTER TABLE player_states ADD COLUMN happy_streak INTEGER DEFAULT 0`,
+  ]) {
+    try { await dbRun(sql); } catch (_) { /* column already exists */ }
+  }
+}
+
 // ------- Game data -------
 
 async function getState() {
   return dbGet(
     `SELECT u.id, u.current_tier, u.day_in_tier, u.player_name,
             ps.city_name, ps.population, ps.treasury, ps.grain_stored, ps.public_anger,
-            lc.rank_title, lc.term_years, lc.harvest_multiplier
+            ps.growth_streak, ps.happy_streak,
+            lc.rank_title, lc.term_years, lc.harvest_multiplier, lc.disaster_risk, lc.growth_threshold
      FROM users u
      JOIN player_states ps ON u.id = ps.user_id
      JOIN level_config lc ON u.current_tier = lc.level_id
@@ -96,9 +116,10 @@ async function saveState(state) {
     [state.current_tier, state.day_in_tier, state.id]
   );
   await dbRun(
-    `UPDATE player_states SET city_name = ?, population = ?, treasury = ?, grain_stored = ?, public_anger = ?
+    `UPDATE player_states SET city_name = ?, population = ?, treasury = ?, grain_stored = ?, public_anger = ?, growth_streak = ?, happy_streak = ?
      WHERE user_id = ?`,
-    [state.city_name, state.population, state.treasury, state.grain_stored, state.public_anger, state.id]
+    [state.city_name, state.population, state.treasury, state.grain_stored, state.public_anger,
+     state.growth_streak || 0, state.happy_streak || 0, state.id]
   );
 }
 
@@ -175,9 +196,16 @@ function populationGrowthRate(anger) {
 }
 
 function processTurn(state, taxRate, grainDistributed) {
-  let { population, treasury, grain_stored, public_anger, current_tier, harvest_multiplier } = state;
+  let { population, treasury, grain_stored, public_anger, current_tier,
+        harvest_multiplier, disaster_risk, growth_threshold } = state;
+
+  let growth_streak = state.growth_streak || 0;
+  let happy_streak  = state.happy_streak  || 0;
+
   let starved = 0;
   let grainCapped = false;
+  const startPopulation = population;
+  const events = [];
 
   // Cap distribution at what's in the silo
   if (grainDistributed > grain_stored) {
@@ -185,43 +213,107 @@ function processTurn(state, taxRate, grainDistributed) {
     grainCapped = true;
   }
 
-  // 1. Starvation Phase
-  const plebsFed = Math.floor(grainDistributed / 20);
-  if (plebsFed < population) {
+  // 1. Grain-based Starvation / Growth (uses grain_stored as Total_Grain_Available)
+  if (grain_stored < population * 20) {
+    const plebsFed = Math.floor(grain_stored / 20);
     starved = population - plebsFed;
     population = plebsFed;
+  } else if (grain_stored > population * growth_threshold) {
+    population = Math.floor(population * 1.01);
   }
-
-  const grainFed = population * 20;
 
   // 2. Treasury Phase
   treasury = treasury + taxRate * population;
 
-  // 3. Harvest Phase
-  grain_stored = grain_stored - grainFed + population * harvest_multiplier;
+  // 3. Harvest Phase — all grain consumed when starving, otherwise player's input
+  const grainConsumed = starved > 0 ? grain_stored : Math.min(grainDistributed, grain_stored);
+  grain_stored = Math.max(0, grain_stored - grainConsumed + population * harvest_multiplier);
 
   // 4. Public Anger Phase
   const baseAnger = -5;
   let taxPenalty = Math.max(0, taxRate - 10);
-  if (current_tier >= 2) taxPenalty = taxPenalty * 1.2;
+  if (current_tier >= 2) taxPenalty *= 1.2;
   const starvationPenalty = Math.min(40,
     population > 0 ? Math.floor((starved / population) * 100) : 100);
 
   public_anger = public_anger + baseAnger + taxPenalty + starvationPenalty;
   public_anger = Math.max(0, Math.min(100, Math.round(public_anger)));
 
-  // 5. Population Growth/Shrink Phase
+  // 5. Anger-based Population Growth/Shrink (runs alongside grain-based system)
   if (population > 0) {
     const rate = populationGrowthRate(public_anger);
     population = Math.max(0, Math.floor(population + population * rate));
   }
 
-  return { ...state, population, treasury, grain_stored, public_anger, _starved: starved, _grainCapped: grainCapped };
+  // 6. Event System (Level 4+)
+  if (current_tier >= 4) {
+    if (current_tier >= 6) {
+      // Level 6-7: two independent rolls — can be both, either, or nothing
+      if (Math.random() < disaster_risk) {
+        const grainLost = Math.floor(grain_stored * disaster_risk);
+        grain_stored = Math.max(0, grain_stored - grainLost);
+        const d = pick(DISASTER_EVENTS);
+        events.push({ type: 'disaster', label: d.label, verb: d.verb, grainLost });
+      }
+      if (public_anger > 50 && Math.random() < disaster_risk) {
+        const popLost = Math.floor(population * disaster_risk);
+        population = Math.max(0, population - popLost);
+        events.push({ type: 'sickness', popLost, city: state.city_name });
+      }
+    } else {
+      // Level 4-5: single roll — sickness (if anger >50) OR disaster OR nothing
+      if (Math.random() < disaster_risk) {
+        if (public_anger > 50) {
+          const popLost = Math.floor(population * disaster_risk);
+          population = Math.max(0, population - popLost);
+          events.push({ type: 'sickness', popLost, city: state.city_name });
+        } else {
+          const grainLost = Math.floor(grain_stored * disaster_risk);
+          grain_stored = Math.max(0, grain_stored - grainLost);
+          const d = pick(DISASTER_EVENTS);
+          events.push({ type: 'disaster', label: d.label, verb: d.verb, grainLost });
+        }
+      }
+    }
+  }
+
+  // 7. Streak Updates & Triggered Events
+
+  // Growth streak — compare final population to start-of-turn population
+  if (population > startPopulation) {
+    growth_streak++;
+  } else {
+    growth_streak = 0;
+  }
+
+  // Happy streak — anger < 20 at end of turn
+  if (public_anger < 20) {
+    happy_streak++;
+  } else {
+    happy_streak = 0;
+  }
+
+  if (growth_streak >= 3) {
+    const bounty = population * 2;
+    treasury += bounty;
+    events.push({ type: 'caesars_favor', amount: bounty });
+    growth_streak = 0;
+  }
+
+  if (happy_streak >= 3) {
+    treasury -= 50000;
+    events.push({ type: 'senatorial_scrutiny' });
+    happy_streak = 0;
+  }
+
+  return { ...state, population, treasury, grain_stored, public_anger, growth_streak, happy_streak,
+           _starved: starved, _grainCapped: grainCapped, _events: events };
 }
 
 // ------- Main loop -------
 
 async function main() {
+  await migrate();
   const reader = new LineReader();
   const inputRegex = /TAX:\s*(\d+)\s+GRAIN:\s*(\d+)(?:\s+BUY:\s*(\d+))?/i;
 
@@ -262,21 +354,32 @@ async function main() {
     if (buyAmount > 0) {
       const cost = buyAmount * grainPrice;
       if (cost > state.treasury) {
-        console.log(`\n  💸 Not enough denarii! ${buyAmount} grain costs ${cost} denarii — your treasury holds only ${state.treasury}.`);
+        console.log(`\n  💸 Not enough denarii! ${buyAmount} grain costs ${cost} denarii — your treasury holds only ${fmt(state.treasury)}.`);
         continue;
       }
       state.treasury -= cost;
       state.grain_stored += buyAmount;
-      console.log(`\n  🛒 Purchased ${buyAmount} grain for ${cost} denarii (${grainPrice} denarii/grain).`);
+      console.log(`\n  🛒 Purchased ${fmt(buyAmount)} grain for ${fmt(cost)} denarii (${grainPrice} denarii/grain).`);
     }
 
     const updated = processTurn(state, taxRate, grainDistributed);
 
     if (updated._grainCapped) {
-      console.log(`\n  ⚠️  [Silo] Only ${state.grain_stored} grain available — distribution capped. Pay attention to your stores!`);
+      console.log(`\n  ⚠️  [Silo] Only ${fmt(state.grain_stored)} grain available — distribution capped. Pay attention to your stores!`);
     }
     if (updated._starved > 0) {
-      console.log(`\n  💀 [Famine] ${updated._starved} plebs starved this year. The gods are displeased.`);
+      console.log(`\n  💀 [Famine] ${fmt(updated._starved)} plebs starved this year. The gods are displeased.`);
+    }
+    for (const ev of updated._events) {
+      if (ev.type === 'disaster') {
+        console.log(`\n  ⚠️  [${ev.label}] Your silos have been ${ev.verb}. ${fmt(ev.grainLost)} grain lost.`);
+      } else if (ev.type === 'sickness') {
+        console.log(`\n  🤒 [Sickness] A plague sweeps through ${ev.city}. ${fmt(ev.popLost)} citizens perished.`);
+      } else if (ev.type === 'caesars_favor') {
+        console.log(`\n  🏛️  [Caesar's Favor] Caesar grants you a bounty of ${fmt(ev.amount)} denarii for your stewardship.`);
+      } else if (ev.type === 'senatorial_scrutiny') {
+        console.log(`\n  📜 [Senatorial Scrutiny] The Senate finds your lack of productivity disturbing. A fine of 50,000 denarii has been levied.`);
+      }
     }
 
     updated.day_in_tier = state.day_in_tier + 1;
@@ -299,7 +402,6 @@ async function main() {
       const nextConfig = await getLevelConfig(state.current_tier + 1);
 
       if (nextConfig) {
-        // Promotion — apply fresh start values from level_config
         const newCity = await getRandomCityForTier(nextConfig.level_id);
         updated.current_tier = nextConfig.level_id;
         updated.day_in_tier = 1;
@@ -308,11 +410,12 @@ async function main() {
         updated.grain_stored = nextConfig.start_grain;
         updated.treasury = nextConfig.start_treasury;
         updated.public_anger = nextConfig.start_anger;
+        updated.growth_streak = 0;
+        updated.happy_streak = 0;
         await saveState(updated);
         console.log(`\n  ⭐ Macte, ${address(state)}! PROMOTED to ${nextConfig.rank_title}!`);
         console.log(`  Ave, ${nextConfig.rank_title} ${state.player_name}! You now rule ${newCity}.\n`);
       } else {
-        // No next level — ultimate victory
         await saveState(updated);
         console.log(`\n  🏆 Ave, Caesar! ${address(updated)}, you have conquered all of Rome!`);
         console.log(`  Roma aeterna bows before you. Your name shall echo through the ages.\n`);
@@ -331,6 +434,7 @@ async function main() {
 // ------- Reset -------
 
 async function resetGame(level) {
+  await migrate();
   const config = await getLevelConfig(level);
   if (!config) {
     console.error(`No level_config found for level ${level}. Check your database.`);
@@ -343,7 +447,7 @@ async function resetGame(level) {
     [level, TEST_EMAIL]
   );
   await dbRun(
-    `UPDATE player_states SET city_name = ?, population = ?, treasury = ?, grain_stored = ?, public_anger = ?
+    `UPDATE player_states SET city_name = ?, population = ?, treasury = ?, grain_stored = ?, public_anger = ?, growth_streak = 0, happy_streak = 0
      WHERE user_id = (SELECT id FROM users WHERE email = ?)`,
     [cityName, config.start_population, config.start_treasury, config.start_grain, config.start_anger, TEST_EMAIL]
   );
