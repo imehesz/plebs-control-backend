@@ -194,6 +194,29 @@ async function migrate() {
   ]) {
     try { await dbRun(sql); } catch (_) { /* column already exists */ }
   }
+  await dbRun(`CREATE TABLE IF NOT EXISTS turn_history (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id          INTEGER NOT NULL,
+    city_name        TEXT    NOT NULL,
+    tier             INTEGER NOT NULL,
+    year_in_tier     INTEGER NOT NULL,
+    tax_rate         INTEGER NOT NULL,
+    grain_ordered    INTEGER NOT NULL,
+    grain_actual     INTEGER NOT NULL,
+    grain_bought     INTEGER NOT NULL DEFAULT 0,
+    pop_start        INTEGER NOT NULL,
+    pop_end          INTEGER NOT NULL,
+    starved          INTEGER NOT NULL DEFAULT 0,
+    treasury_start   INTEGER NOT NULL,
+    treasury_end     INTEGER NOT NULL,
+    grain_start      INTEGER NOT NULL,
+    grain_end        INTEGER NOT NULL,
+    anger_start      INTEGER NOT NULL,
+    anger_end        INTEGER NOT NULL,
+    events           TEXT    NOT NULL DEFAULT '[]',
+    created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  )`);
 }
 
 // ------- Game data -------
@@ -214,6 +237,28 @@ async function getState() {
 
 async function getLevelConfig(levelId) {
   return dbGet(`SELECT * FROM level_config WHERE level_id = ?`, [levelId]);
+}
+
+async function saveTurnHistory(h) {
+  await dbRun(
+    `INSERT INTO turn_history
+       (user_id, city_name, tier, year_in_tier,
+        tax_rate, grain_ordered, grain_actual, grain_bought,
+        pop_start, pop_end, starved,
+        treasury_start, treasury_end,
+        grain_start, grain_end,
+        anger_start, anger_end, events)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      h.userId, h.cityName, h.tier, h.yearInTier,
+      h.taxRate, h.grainOrdered, h.grainActual, h.grainBought,
+      h.popStart, h.popEnd, h.starved,
+      h.treasuryStart, h.treasuryEnd,
+      h.grainStart, h.grainEnd,
+      h.angerStart, h.angerEnd,
+      JSON.stringify(h.events),
+    ]
+  );
 }
 
 async function saveState(state) {
@@ -278,7 +323,7 @@ function bar(value, max, width = 20) {
 
 function displayStats(state, grainPrice, prev) {
   const p = prev || {};
-  console.log('\n' + '═'.repeat(58));
+  console.log('═'.repeat(58));
   console.log(`  🏛️  PLEBS CONTROL  |  ${state.rank_title}`);
   console.log(`  City: ${state.city_name.padEnd(20)}  Year ${toRoman(state.day_in_tier)} of ${toRoman(state.term_years)}`);
   console.log('─'.repeat(58));
@@ -318,8 +363,9 @@ function processTurn(state, taxRate, grainDistributed) {
 
   // Active Tax Base: population 10%+ above level start → reduce anger
   if (state.start_population && population > state.start_population * 1.10) {
+    const angerBefore = public_anger;
     public_anger = Math.max(0, public_anger - 5);
-    events.push({ type: 'boom_town' });
+    events.push({ type: 'boom_town', angerReduced: angerBefore - public_anger });
   }
 
   // 1. Grain-based Starvation / Growth (based on what player actually distributed)
@@ -450,7 +496,7 @@ async function main() {
       break;
     }
 
-    const rawInput = await reader.read(`\n  ${randomGreeting()}, ${address(state)} — enter your orders > `);
+    const rawInput = await reader.read(`\n  Enter your orders > `);
     if (rawInput === null) break;
 
     const match = rawInput.match(inputRegex);
@@ -459,9 +505,16 @@ async function main() {
       continue;
     }
 
+    console.log(`\n  ${randomGreeting()}, ${address(state)}!`);
+
     const taxRate = parseInt(match[1], 10);
     const grainDistributed = parseInt(match[2], 10);
     const buyAmount = match[3] ? parseInt(match[3], 10) : 0;
+
+    const snapPop = state.population;
+    const snapTreasury = state.treasury;
+    const snapGrain = state.grain_stored;
+    const snapAnger = state.public_anger;
 
     if (buyAmount > 0) {
       const cost = buyAmount * grainPrice;
@@ -475,6 +528,19 @@ async function main() {
     }
 
     const updated = processTurn(state, taxRate, grainDistributed);
+
+    await saveTurnHistory({
+      userId: state.id, cityName: state.city_name,
+      tier: state.current_tier, yearInTier: state.day_in_tier,
+      taxRate, grainOrdered: grainDistributed,
+      grainActual: Math.min(grainDistributed, state.grain_stored),
+      grainBought: buyAmount,
+      popStart: snapPop, popEnd: updated.population, starved: updated._starved,
+      treasuryStart: snapTreasury, treasuryEnd: updated.treasury,
+      grainStart: snapGrain, grainEnd: updated.grain_stored,
+      angerStart: snapAnger, angerEnd: updated.public_anger,
+      events: updated._events,
+    });
 
     if (updated._grainCapped) {
       console.log(`\n  ⚠️  [Silo] Only ${fmt(state.grain_stored)} grain available — distribution capped. Pay attention to your stores!`);
@@ -492,7 +558,8 @@ async function main() {
       } else if (ev.type === 'senatorial_scrutiny') {
         console.log(`\n  📜 [Senatorial Scrutiny] The Senate finds your lack of productivity disturbing. A fine of 50,000 denarii has been levied.`);
       } else if (ev.type === 'boom_town') {
-        console.log(`\n  📈 [Boom Town] The city is thriving and expanding! The plebs are optimistic. (-5 Anger)`);
+        const angerNote = ev.angerReduced > 0 ? ` (-${ev.angerReduced} Anger)` : '';
+        console.log(`\n  📈 [Boom Town] The city is thriving and expanding! The plebs are optimistic.${angerNote}`);
       }
     }
 
