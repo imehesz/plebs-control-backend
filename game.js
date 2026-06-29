@@ -5,15 +5,20 @@ const path = require('path');
 const DB_PATH = path.join(__dirname, 'plebs_control.db');
 const TEST_EMAIL = 'imtest@gmail.com';
 
-const TIER_NAMES = { 1: 'Probation (The Duumvir)', 2: 'Governance (The Governor)' };
-const TIER_DURATIONS = { 1: 5, 2: 10 };
-
 const ROMAN_NUMERALS = ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X',
-  'XI', 'XII', 'XIII', 'XIV', 'XV'];
+  'XI', 'XII', 'XIII', 'XIV', 'XV', 'XVI', 'XVII', 'XVIII', 'XIX', 'XX'];
 function toRoman(n) { return ROMAN_NUMERALS[n] || String(n); }
 
 const GREETINGS = ['Salve', 'Ave', 'Salvete', 'Bene venisti', 'Io'];
 function randomGreeting() { return GREETINGS[Math.floor(Math.random() * GREETINGS.length)]; }
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+function fmt(n) { return Math.round(n).toLocaleString('en-US'); }
+function arrow(curr, prev) {
+  if (prev == null) return '  ';
+  if (curr > prev) return ' ↑';
+  if (curr < prev) return ' ↓';
+  return '  ';
+}
 
 const db = new sqlite3.Database(DB_PATH);
 
@@ -71,17 +76,19 @@ class LineReader {
 async function getState() {
   return dbGet(
     `SELECT u.id, u.current_tier, u.day_in_tier, u.player_name,
-            ps.city_name, ps.population, ps.treasury, ps.grain_stored, ps.public_anger
+            ps.city_name, ps.population, ps.treasury, ps.grain_stored, ps.public_anger,
+            lc.rank_title, lc.term_years, lc.harvest_multiplier
      FROM users u
      JOIN player_states ps ON u.id = ps.user_id
+     JOIN level_config lc ON u.current_tier = lc.level_id
      WHERE u.email = ?`,
     [TEST_EMAIL]
   );
 }
 
-const RANK_TITLES = { 1: 'Duumvir', 2: 'Governor' };
-function rankTitle(tier) { return RANK_TITLES[tier] || `Tier ${tier}`; }
-function address(state) { return `${rankTitle(state.current_tier)} ${state.player_name}`; }
+async function getLevelConfig(levelId) {
+  return dbGet(`SELECT * FROM level_config WHERE level_id = ?`, [levelId]);
+}
 
 async function saveState(state) {
   await dbRun(
@@ -103,9 +110,9 @@ async function getRandomCityForTier(tier) {
   return row ? row.name : 'Unknown';
 }
 
-// ------- Treasury taunts on overthrow -------
+function address(state) { return `${state.rank_title} ${state.player_name}`; }
 
-function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+// ------- Treasury taunts on overthrow -------
 
 function treasuryTaunt(treasury, name) {
   if (treasury >= 20000) {
@@ -126,7 +133,6 @@ function treasuryTaunt(treasury, name) {
       `Some denarii, some chaos, zero dignity. An average ending for an average ruler.`,
     ]);
   }
-  // broke
   return pick([
     `Broke AND overthrown, ${name}. Caesar is furious — you owe him money.`,
     `The mob chases you through the streets. Caesar's debt collectors are right behind them.`,
@@ -143,21 +149,18 @@ function bar(value, max, width = 20) {
   return '[' + '█'.repeat(filled) + '░'.repeat(width - filled) + ']';
 }
 
-function displayStats(state, grainPrice) {
-  const tier = state.current_tier;
-  const duration = TIER_DURATIONS[tier] || '?';
-  const tierName = TIER_NAMES[tier] || `Tier ${tier}`;
-
-  console.log('\n' + '═'.repeat(52));
-  console.log(`  🏛️  PLEBS CONTROL  |  ${tierName}`);
-  console.log(`  City: ${state.city_name.padEnd(20)}  Year ${toRoman(state.day_in_tier)} of ${toRoman(duration)}`);
-  console.log('─'.repeat(52));
-  console.log(`  👥 Population : ${String(state.population).padStart(7)}  ${bar(state.population, 5000)}`);
-  console.log(`  🌾 Grain      : ${String(state.grain_stored).padStart(7)}`);
-  console.log(`  🪙 Treasury   : ${String(state.treasury).padStart(7)}`);
-  console.log(`  📈 Mkt Price  : ${String(grainPrice).padStart(7)}  denarii/grain`);
-  console.log(`  😠 Anger      : ${String(state.public_anger).padStart(7)}  ${bar(state.public_anger, 100)}`);
-  console.log('═'.repeat(52));
+function displayStats(state, grainPrice, prev) {
+  const p = prev || {};
+  console.log('\n' + '═'.repeat(58));
+  console.log(`  🏛️  PLEBS CONTROL  |  ${state.rank_title}`);
+  console.log(`  City: ${state.city_name.padEnd(20)}  Year ${toRoman(state.day_in_tier)} of ${toRoman(state.term_years)}`);
+  console.log('─'.repeat(58));
+  console.log(`  👥 Population : ${fmt(state.population).padStart(12)}${arrow(state.population, p.population)}`);
+  console.log(`  🌾 Grain      : ${fmt(state.grain_stored).padStart(12)}${arrow(state.grain_stored, p.grain_stored)}`);
+  console.log(`  🪙 Treasury   : ${fmt(state.treasury).padStart(12)}${arrow(state.treasury, p.treasury)}`);
+  console.log(`  📈 Mkt Price  : ${fmt(grainPrice).padStart(12)}  denarii/grain`);
+  console.log(`  😠 Anger      : ${fmt(state.public_anger).padStart(12)}${arrow(state.public_anger, p.public_anger)}  ${bar(state.public_anger, 100)}`);
+  console.log('═'.repeat(58));
 }
 
 // ------- Simulation -------
@@ -168,11 +171,11 @@ function populationGrowthRate(anger) {
   if (anger <= 20) return  0.01;
   if (anger <= 30) return -0.05;
   if (anger <= 40) return -0.10;
-  return -0.25; // 40-100
+  return -0.25;
 }
 
 function processTurn(state, taxRate, grainDistributed) {
-  let { population, treasury, grain_stored, public_anger, current_tier } = state;
+  let { population, treasury, grain_stored, public_anger, current_tier, harvest_multiplier } = state;
   let starved = 0;
   let grainCapped = false;
 
@@ -189,28 +192,26 @@ function processTurn(state, taxRate, grainDistributed) {
     population = plebsFed;
   }
 
-  // grainFed = grain actually consumed by the fed plebs
   const grainFed = population * 20;
 
   // 2. Treasury Phase
   treasury = treasury + taxRate * population;
 
   // 3. Harvest Phase
-  const harvest = current_tier <= 2 ? population * 4 : population * 2;
-  grain_stored = grain_stored - grainFed + harvest;
+  grain_stored = grain_stored - grainFed + population * harvest_multiplier;
 
   // 4. Public Anger Phase
   const baseAnger = -5;
   let taxPenalty = Math.max(0, taxRate - 10);
-  if (current_tier === 2) taxPenalty = taxPenalty * 1.2;
+  if (current_tier >= 2) taxPenalty = taxPenalty * 1.2;
   const starvationPenalty = Math.min(40,
     population > 0 ? Math.floor((starved / population) * 100) : 100);
 
   public_anger = public_anger + baseAnger + taxPenalty + starvationPenalty;
   public_anger = Math.max(0, Math.min(100, Math.round(public_anger)));
 
-  // 5. Population Growth/Shrink Phase (tiers 1 & 2)
-  if (current_tier <= 2 && population > 0) {
+  // 5. Population Growth/Shrink Phase
+  if (population > 0) {
     const rate = populationGrowthRate(public_anger);
     population = Math.max(0, Math.floor(population + population * rate));
   }
@@ -228,10 +229,12 @@ async function main() {
   console.log(`\n  🏛️  Salve, ${address(intro)}! Welcome to PLEBS CONTROL`);
   console.log("  Rule your Roman city. Don't let them starve or revolt.\n");
 
+  let prevState = null;
   while (true) {
     const state = await getState();
     const grainPrice = Math.floor(Math.random() * 4) + 1;
-    displayStats(state, grainPrice);
+    displayStats(state, grainPrice, prevState);
+    prevState = { population: state.population, grain_stored: state.grain_stored, treasury: state.treasury, public_anger: state.public_anger };
 
     if (state.population <= 0) {
       console.log(`\n  ☠️  GAME OVER — Vale, ${address(state)}. Your city has perished. The last pleb has died.\n`);
@@ -244,7 +247,7 @@ async function main() {
     }
 
     const rawInput = await reader.read(`\n  ${randomGreeting()}, ${address(state)} — enter your orders > `);
-    if (rawInput === null) break; // EOF / Ctrl+C
+    if (rawInput === null) break;
 
     const match = rawInput.match(inputRegex);
     if (!match) {
@@ -291,25 +294,32 @@ async function main() {
       break;
     }
 
-    // Check tier completion
-    const tierDuration = TIER_DURATIONS[state.current_tier];
-    if (state.day_in_tier >= tierDuration) {
-      if (state.current_tier === 1) {
-        const newCity = await getRandomCityForTier(2);
-        updated.current_tier = 2;
+    // Check level completion
+    if (state.day_in_tier >= state.term_years) {
+      const nextConfig = await getLevelConfig(state.current_tier + 1);
+
+      if (nextConfig) {
+        // Promotion — apply fresh start values from level_config
+        const newCity = await getRandomCityForTier(nextConfig.level_id);
+        updated.current_tier = nextConfig.level_id;
         updated.day_in_tier = 1;
         updated.city_name = newCity;
+        updated.population = nextConfig.start_population;
+        updated.grain_stored = nextConfig.start_grain;
+        updated.treasury = nextConfig.start_treasury;
+        updated.public_anger = nextConfig.start_anger;
         await saveState(updated);
-        console.log(`\n  ⭐ Macte, ${address(state)}! PROMOTED — You have survived Probation!`);
-        console.log(`  Ave, Governor ${state.player_name}! You now rule ${newCity}.\n`);
-        continue;
-      }
-
-      if (state.current_tier === 2) {
+        console.log(`\n  ⭐ Macte, ${address(state)}! PROMOTED to ${nextConfig.rank_title}!`);
+        console.log(`  Ave, ${nextConfig.rank_title} ${state.player_name}! You now rule ${newCity}.\n`);
+      } else {
+        // No next level — ultimate victory
         await saveState(updated);
-        console.log(`\n  🏆 Io! Io! VICTORIA — ${address(updated)}, you have mastered Governance. Roma aeterna is pleased.\n`);
+        console.log(`\n  🏆 Ave, Caesar! ${address(updated)}, you have conquered all of Rome!`);
+        console.log(`  Roma aeterna bows before you. Your name shall echo through the ages.\n`);
         break;
       }
+
+      continue;
     }
 
     await saveState(updated);
@@ -318,23 +328,36 @@ async function main() {
   db.close();
 }
 
-async function resetGame() {
+// ------- Reset -------
+
+async function resetGame(level) {
+  const config = await getLevelConfig(level);
+  if (!config) {
+    console.error(`No level_config found for level ${level}. Check your database.`);
+    db.close();
+    process.exit(1);
+  }
+  const cityName = await getRandomCityForTier(level);
   await dbRun(
-    `UPDATE users SET current_tier = 1, day_in_tier = 1 WHERE email = ?`,
-    [TEST_EMAIL]
+    `UPDATE users SET current_tier = ?, day_in_tier = 1 WHERE email = ?`,
+    [level, TEST_EMAIL]
   );
   await dbRun(
-    `UPDATE player_states SET city_name = 'Vindolanda', population = 1000, treasury = 0,
-     grain_stored = 50000, public_anger = 20
+    `UPDATE player_states SET city_name = ?, population = ?, treasury = ?, grain_stored = ?, public_anger = ?
      WHERE user_id = (SELECT id FROM users WHERE email = ?)`,
-    [TEST_EMAIL]
+    [cityName, config.start_population, config.start_treasury, config.start_grain, config.start_anger, TEST_EMAIL]
   );
-  console.log('Game reset to starting state.');
+  console.log(`Game reset to Level ${level} (${config.rank_title}).`);
   db.close();
 }
 
-if (process.argv.includes('--resetGame')) {
-  resetGame().catch((err) => { console.error('Reset failed:', err); process.exit(1); });
+// ------- Entry point -------
+
+const resetIdx = process.argv.indexOf('--resetGame');
+if (resetIdx !== -1) {
+  const levelArg = process.argv[resetIdx + 1];
+  const level = levelArg && /^\d+$/.test(levelArg) ? parseInt(levelArg, 10) : 1;
+  resetGame(level).catch((err) => { console.error('Reset failed:', err); process.exit(1); });
 } else {
   main().catch((err) => { console.error('Fatal error:', err); process.exit(1); });
 }
