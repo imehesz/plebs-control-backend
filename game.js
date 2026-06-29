@@ -1,6 +1,8 @@
 const sqlite3 = require('sqlite3').verbose();
 const readline = require('readline');
+const crypto = require('crypto');
 const path = require('path');
+const { sendVerification, sendWelcome } = require('./mailer');
 
 const DB_PATH = path.join(__dirname, 'plebs_control.db');
 const TEST_EMAIL = 'imtest@gmail.com';
@@ -191,6 +193,8 @@ async function migrate() {
   for (const sql of [
     `ALTER TABLE player_states ADD COLUMN growth_streak INTEGER DEFAULT 0`,
     `ALTER TABLE player_states ADD COLUMN happy_streak INTEGER DEFAULT 0`,
+    `ALTER TABLE users ADD COLUMN verification_token TEXT`,
+    `ALTER TABLE users ADD COLUMN verification_expires INTEGER`,
   ]) {
     try { await dbRun(sql); } catch (_) { /* column already exists */ }
   }
@@ -472,7 +476,9 @@ function processTurn(state, taxRate, grainDistributed) {
 async function main() {
   await migrate();
   const reader = new LineReader();
-  const inputRegex = /TAX:\s*(\d+)\s+GRAIN:\s*(\d+)(?:\s+BUY:\s*(\d+))?/i;
+  const TAX_RE   = /TAX:\s*(\d+)/i;
+  const GRAIN_RE = /GRAIN:\s*(\d+)/i;
+  const BUY_RE   = /BUY:\s*(\d+)/i;
 
   const intro = await getState();
   console.log(`\n  🏛️  Salve, ${address(intro)}! Welcome to PLEBS CONTROL`);
@@ -499,17 +505,19 @@ async function main() {
     const rawInput = await reader.read(`\n  Enter your orders > `);
     if (rawInput === null) break;
 
-    const match = rawInput.match(inputRegex);
-    if (!match) {
+    const taxMatch   = rawInput.match(TAX_RE);
+    const grainMatch = rawInput.match(GRAIN_RE);
+    if (!taxMatch || !grainMatch) {
       console.log('  📜 The Scribe is bewildered. By Juno! Use format: TAX: [number] GRAIN: [number] BUY: [number](optional)');
       continue;
     }
 
     console.log(`\n  ${randomGreeting()}, ${address(state)}!`);
 
-    const taxRate = parseInt(match[1], 10);
-    const grainDistributed = parseInt(match[2], 10);
-    const buyAmount = match[3] ? parseInt(match[3], 10) : 0;
+    const taxRate        = parseInt(taxMatch[1], 10);
+    const grainDistributed = parseInt(grainMatch[1], 10);
+    const buyMatch       = rawInput.match(BUY_RE);
+    const buyAmount      = buyMatch ? parseInt(buyMatch[1], 10) : 0;
 
     const snapPop = state.population;
     const snapTreasury = state.treasury;
@@ -648,13 +656,104 @@ async function resetGame(level) {
   db.close();
 }
 
+// ------- Signup -------
+
+function ask(rl, question) {
+  return new Promise((resolve) => rl.question(question, resolve));
+}
+
+async function signup(emailArg, nameArg) {
+  await migrate();
+
+  let email, playerName;
+
+  if (emailArg && nameArg) {
+    email = emailArg.trim().toLowerCase();
+    playerName = nameArg.trim();
+  } else {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    console.log('\n  🏛️  PLEBS CONTROL — New Player Signup\n');
+    email = (await ask(rl, '  Email address : ')).trim().toLowerCase();
+    playerName = (await ask(rl, '  Player name   : ')).trim();
+    rl.close();
+  }
+
+  if (!email || !playerName) {
+    console.log('  Email and player name are required.'); db.close(); return;
+  }
+
+  const existing = await dbGet('SELECT id FROM users WHERE email = ?', [email]);
+  if (existing) {
+    console.log(`\n  A player with that email already exists.`); db.close(); return;
+  }
+
+  const token = crypto.randomBytes(16).toString('hex');
+  const expires = Date.now() + 24 * 60 * 60 * 1000;
+
+  await dbRun(
+    `INSERT INTO users (email, player_name, delivery_hour_utc, verified, verification_token, verification_expires)
+     VALUES (?, ?, 12, 0, ?, ?)`,
+    [email, playerName, token, expires]
+  );
+
+  await sendVerification(email, playerName);
+
+  console.log(`\n  ✅ Verification email sent to ${email}.`);
+  console.log(`  Check Mailpit at http://localhost:8025\n`);
+  db.close();
+}
+
+// ------- Verify -------
+
+async function verify(token) {
+  await migrate();
+
+  if (!token) {
+    console.log('  Usage: node game.js --verify [token]'); db.close(); return;
+  }
+
+  const user = await dbGet(
+    'SELECT * FROM users WHERE verification_token = ?', [token]
+  );
+
+  if (!user) {
+    console.log('\n  ❌ Invalid or already-used verification token.\n'); db.close(); return;
+  }
+  if (Date.now() > user.verification_expires) {
+    console.log('\n  ❌ This token has expired. Request a new signup.\n'); db.close(); return;
+  }
+
+  const cityName = await getRandomCityForTier(1);
+  const levelConfig = await getLevelConfig(1);
+
+  await dbRun(
+    `UPDATE users SET verified = 1, verification_token = NULL, verification_expires = NULL WHERE id = ?`,
+    [user.id]
+  );
+  await dbRun(
+    `INSERT OR IGNORE INTO player_states (user_id, city_name, population, treasury, grain_stored, public_anger)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [user.id, cityName, levelConfig.start_population, levelConfig.start_treasury,
+     levelConfig.start_grain, levelConfig.start_anger]
+  );
+
+  await sendWelcome(user.email, user.player_name, levelConfig.rank_title, cityName);
+
+  console.log(`\n  ✅ ${user.player_name} verified! City assigned: ${cityName}`);
+  console.log(`  Welcome email sent — check Mailpit at http://localhost:8025\n`);
+  db.close();
+}
+
 // ------- Entry point -------
 
-const resetIdx = process.argv.indexOf('--resetGame');
-if (resetIdx !== -1) {
-  const levelArg = process.argv[resetIdx + 1];
-  const level = levelArg && /^\d+$/.test(levelArg) ? parseInt(levelArg, 10) : 1;
+const args = process.argv.slice(2);
+if (args[0] === '--resetGame') {
+  const level = args[1] && /^\d+$/.test(args[1]) ? parseInt(args[1], 10) : 1;
   resetGame(level).catch((err) => { console.error('Reset failed:', err); process.exit(1); });
+} else if (args[0] === '--signup') {
+  signup(args[1], args[2]).catch((err) => { console.error('Signup failed:', err); process.exit(1); });
+} else if (args[0] === '--verify') {
+  verify(args[1]).catch((err) => { console.error('Verify failed:', err); process.exit(1); });
 } else {
   main().catch((err) => { console.error('Fatal error:', err); process.exit(1); });
 }
