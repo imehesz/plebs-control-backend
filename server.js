@@ -1,7 +1,7 @@
 const http = require('http');
 const { sendWelcome, sendOrderError } = require('./mailer');
 const { PORT } = require('./config');
-const { dbGet, dbRun } = require('./db');
+const { dbGet, dbAll, dbRun } = require('./db');
 
 // Strip quoted reply content — drop lines starting with '>' and everything after 'On ... wrote:'
 function stripReply(text) {
@@ -125,7 +125,41 @@ async function handleInbound(payload) {
   return { status: 200, message: 'Orders received' };
 }
 
+function setCORS(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+
+async function handleLegions(res) {
+  const rows = await dbAll(
+    `SELECT u.id, u.player_name, lc.rank_title, u.current_tier,
+            ps.city_name, ps.population, ps.treasury, ps.grain_stored
+     FROM users u
+     JOIN player_states ps ON ps.user_id = u.id
+     JOIN level_config lc  ON lc.level_id = u.current_tier
+     WHERE u.verified = 1
+     ORDER BY u.current_tier DESC, ps.population DESC`
+  );
+  const payload = rows.map((r, i) => ({ ...r, rank: i + 1 }));
+  setCORS(res);
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(payload));
+}
+
 const server = http.createServer(async (req, res) => {
+  if (req.method === 'OPTIONS') {
+    setCORS(res); res.writeHead(204); res.end(); return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/legions') {
+    try { await handleLegions(res); } catch (e) {
+      console.error('[legions]', e);
+      res.writeHead(500); res.end('Error');
+    }
+    return;
+  }
+
   if (req.method !== 'POST' || req.url !== '/inbound') {
     res.writeHead(404); res.end('Not found'); return;
   }
@@ -134,7 +168,20 @@ const server = http.createServer(async (req, res) => {
   req.on('data', chunk => { body += chunk; });
   req.on('end', async () => {
     try {
-      const payload = JSON.parse(body);
+      const ct = req.headers['content-type'] || '';
+      let payload;
+      if (ct.includes('application/json')) {
+        payload = JSON.parse(body);
+      } else {
+        // Mailgun inbound: form-encoded with different field names
+        const params = new URLSearchParams(body);
+        const from = params.get('from') || params.get('sender') || '';
+        const emailMatch = from.match(/<([^>]+)>/);
+        payload = {
+          from: emailMatch ? emailMatch[1] : from,
+          text: params.get('stripped-text') || params.get('body-plain') || '',
+        };
+      }
       const result = await handleInbound(payload);
       res.writeHead(result.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));

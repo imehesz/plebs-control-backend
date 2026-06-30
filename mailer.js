@@ -1,15 +1,15 @@
 const nodemailer = require('nodemailer');
-const { SMTP_HOST, SMTP_PORT } = require('./config');
+const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = require('./config');
 const { toRoman, randomGreeting, fmt, arrow, bar, CITY_MAPS, CAESAR_ART } = require('./helpers');
 
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
   secure: false,
-  ignoreTLS: true,
+  auth: { user: SMTP_USER, pass: SMTP_PASS },
 });
 
-const FROM = '"Plebs Control — Cursus Publicus" <dispatch@plebs-control.local>';
+const FROM = '"Plebs Control — Cursus Publicus" <dispatch@plebscontrol.com>';
 
 async function sendVerification(to, playerName) {
   const subject = 'Plebs Control — Confirm Your Senatorial Appointment';
