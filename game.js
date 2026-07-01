@@ -5,7 +5,7 @@ const { processTurn } = require('./engine');
 const { dbGet, dbRun, close } = require('./db');
 const TEST_EMAIL = 'imtest@gmail.com';
 
-const { toRoman, randomGreeting, pick, fmt, arrow, bar, CITY_MAPS, CAESAR_ART } = require('./helpers');
+const { toRoman, randomGreeting, pick, fmt, arrow, bar, CITY_MAPS, CAESAR_ART, rollSellPrice } = require('./helpers');
 const { DISASTER_EVENTS } = require('./engine');
 
 
@@ -76,6 +76,7 @@ async function migrate() {
     grain_ordered    INTEGER NOT NULL,
     grain_actual     INTEGER NOT NULL,
     grain_bought     INTEGER NOT NULL DEFAULT 0,
+    grain_sold       INTEGER NOT NULL DEFAULT 0,
     pop_start        INTEGER NOT NULL,
     pop_end          INTEGER NOT NULL,
     starved          INTEGER NOT NULL DEFAULT 0,
@@ -115,15 +116,15 @@ async function saveTurnHistory(h) {
   await dbRun(
     `INSERT INTO turn_history
        (user_id, city_name, tier, year_in_tier,
-        tax_rate, grain_ordered, grain_actual, grain_bought,
+        tax_rate, grain_ordered, grain_actual, grain_bought, grain_sold,
         pop_start, pop_end, starved,
         treasury_start, treasury_end,
         grain_start, grain_end,
         anger_start, anger_end, events)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       h.userId, h.cityName, h.tier, h.yearInTier,
-      h.taxRate, h.grainOrdered, h.grainActual, h.grainBought,
+      h.taxRate, h.grainOrdered, h.grainActual, h.grainBought, h.grainSold,
       h.popStart, h.popEnd, h.starved,
       h.treasuryStart, h.treasuryEnd,
       h.grainStart, h.grainEnd,
@@ -188,7 +189,7 @@ function treasuryTaunt(treasury, name) {
 
 // ------- Display -------
 
-function displayStats(state, grainPrice, prev) {
+function displayStats(state, grainPrice, prev, sellPrice) {
   const p = prev || {};
   console.log('═'.repeat(58));
   console.log(`  🏛️  PLEBS CONTROL  |  ${state.rank_title}`);
@@ -198,7 +199,8 @@ function displayStats(state, grainPrice, prev) {
   console.log(`  🌾 Grain      : ${fmt(state.grain_stored).padStart(12)}${arrow(state.grain_stored, p.grain_stored)}`);
   console.log(`     Feed Need  : ${fmt(state.population * 20).padStart(12)}  (pop × 20)`);
   console.log(`  🪙 Treasury   : ${fmt(state.treasury).padStart(12)}${arrow(state.treasury, p.treasury)}`);
-  console.log(`  📈 Mkt Price  : ${fmt(grainPrice).padStart(12)}  denarii/grain`);
+  console.log(`  📈 Buy Price  : ${fmt(grainPrice).padStart(12)}  denarii/grain`);
+  console.log(`  📉 Sell Price : ${fmt(sellPrice).padStart(12)}  denarii/grain`);
   console.log(`  😠 Anger      : ${fmt(state.public_anger).padStart(12)}${arrow(state.public_anger, p.public_anger)}  ${bar(state.public_anger, 100)}`);
   console.log('═'.repeat(58));
 }
@@ -211,6 +213,7 @@ async function main() {
   const TAX_RE   = /TAX:\s*(\d+)/i;
   const GRAIN_RE = /GRAIN:\s*(\d+)/i;
   const BUY_RE   = /BUY:\s*(\d+)/i;
+  const SELL_RE  = /SELL:\s*(\d+)/i;
 
   const intro = await getState();
   console.log(`\n  🏛️  Salve, ${address(intro)}! Welcome to PLEBS CONTROL`);
@@ -220,7 +223,8 @@ async function main() {
   while (true) {
     const state = await getState();
     const grainPrice = Math.floor(Math.random() * 4) + 1;
-    displayStats(state, grainPrice, prevState);
+    const sellPrice = rollSellPrice(grainPrice);
+    displayStats(state, grainPrice, prevState, sellPrice);
     if (state.day_in_tier === 1) displayCityMap(state.current_tier);
     prevState = { population: state.population, grain_stored: state.grain_stored, treasury: state.treasury, public_anger: state.public_anger };
 
@@ -240,7 +244,7 @@ async function main() {
     const taxMatch   = rawInput.match(TAX_RE);
     const grainMatch = rawInput.match(GRAIN_RE);
     if (!taxMatch || !grainMatch) {
-      console.log('  📜 The Scribe is bewildered. By Juno! Use format: TAX: [number] GRAIN: [number] BUY: [number](optional)');
+      console.log('  📜 The Scribe is bewildered. By Juno! Use format: TAX: [number] GRAIN: [number] BUY: [number](optional) SELL: [number](optional)');
       continue;
     }
 
@@ -250,6 +254,9 @@ async function main() {
     const grainDistributed = parseInt(grainMatch[1], 10);
     const buyMatch       = rawInput.match(BUY_RE);
     const buyAmount      = buyMatch ? parseInt(buyMatch[1], 10) : 0;
+    const sellMatch      = rawInput.match(SELL_RE);
+    const requestedSell  = sellMatch ? parseInt(sellMatch[1], 10) : 0;
+    let sellAmount = 0;
 
     const snapPop = state.population;
     const snapTreasury = state.treasury;
@@ -267,6 +274,20 @@ async function main() {
       console.log(`\n  🛒 Purchased ${fmt(buyAmount)} grain for ${fmt(cost)} denarii (${grainPrice} denarii/grain).`);
     }
 
+    if (requestedSell > 0) {
+      const sellable = Math.max(0, state.grain_stored - grainDistributed);
+      sellAmount = Math.min(requestedSell, sellable);
+      if (sellAmount > 0) {
+        const proceeds = sellAmount * sellPrice;
+        state.treasury += proceeds;
+        state.grain_stored -= sellAmount;
+        console.log(`\n  💰 Sold ${fmt(sellAmount)} grain for ${fmt(proceeds)} denarii (${sellPrice} denarii/grain).`);
+      }
+      if (sellAmount < requestedSell) {
+        console.log(`\n  📉 [Market] Only ${fmt(sellAmount)} grain could be sold after reserving this year's distribution.`);
+      }
+    }
+
     const updated = processTurn(state, taxRate, grainDistributed);
 
     await saveTurnHistory({
@@ -274,7 +295,7 @@ async function main() {
       tier: state.current_tier, yearInTier: state.day_in_tier,
       taxRate, grainOrdered: grainDistributed,
       grainActual: Math.min(grainDistributed, state.grain_stored),
-      grainBought: buyAmount,
+      grainBought: buyAmount, grainSold: sellAmount,
       popStart: snapPop, popEnd: updated.population, starved: updated._starved,
       treasuryStart: snapTreasury, treasuryEnd: updated.treasury,
       grainStart: snapGrain, grainEnd: updated.grain_stored,

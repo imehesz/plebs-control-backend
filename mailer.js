@@ -66,7 +66,7 @@ async function sendWelcome(to, playerName, rankTitle, cityName, dispatchTime = '
   await transporter.sendMail({ from: FROM, to, subject, text });
 }
 
-async function sendYearOneDispatch(to, state, grainPrice = 2) {
+async function sendYearOneDispatch(to, state, grainPrice = 2, sellPrice = 1) {
   const { rank_title, player_name, city_name, term_years, current_tier,
           population, grain_stored, treasury, public_anger } = state;
   const subject = `Plebs Control — ${city_name}, Year I of ${toRoman(term_years)}`;
@@ -87,18 +87,19 @@ async function sendYearOneDispatch(to, state, grainPrice = 2) {
     `     Feed Need  : ${fmt(population * 20).padStart(12)}  (pop × 20)`,
     `  🪙 Treasury   : ${fmt(treasury).padStart(12)}`,
     `  😠 Anger      : ${fmt(public_anger).padStart(12)}  ${bar(public_anger, 100)}`,
-    `  📈 Mkt Price  : ${fmt(grainPrice).padStart(12)}  denarii/grain`,
+    `  📈 Buy Price  : ${fmt(grainPrice).padStart(12)}  denarii/grain`,
+    `  📉 Sell Price : ${fmt(sellPrice).padStart(12)}  denarii/grain`,
     '═'.repeat(58),
     '',
     `  Enter your orders for Year I:`,
-    '  TAX: [number]  GRAIN: [number]  BUY: [number](optional)',
+    '  TAX: [number]  GRAIN: [number]  BUY: [number](optional)  SELL: [number](optional)',
   ];
 
   await transporter.sendMail({ from: FROM, to, subject, text: L.join('\n') });
 }
 
 
-async function sendDispatch(to, state, updated, orders, grainPrice, nextGrainPrice) {
+async function sendDispatch(to, state, updated, orders, grainPrice, nextGrainPrice, sellPrice, nextSellPrice) {
   const { rank_title, player_name, city_name, term_years } = state;
   const year = state.day_in_tier;
   // Label the email as the year the player is now entering (year+1), except on the final year
@@ -117,13 +118,16 @@ async function sendDispatch(to, state, updated, orders, grainPrice, nextGrainPri
   L.push(`  🌾 Grain      : ${fmt(updated.grain_stored).padStart(12)}${arrow(updated.grain_stored, state.grain_stored)}`);
   L.push(`     Feed Need  : ${fmt(updated.population * 20).padStart(12)}  (pop × 20)`);
   L.push(`  🪙 Treasury   : ${fmt(updated.treasury).padStart(12)}${arrow(updated.treasury, state.treasury)}`);
-  L.push(`  📈 Mkt Price  : ${fmt(nextGrainPrice ?? grainPrice).padStart(12)}  denarii/grain`);
+  L.push(`  📈 Buy Price  : ${fmt(nextGrainPrice ?? grainPrice).padStart(12)}  denarii/grain`);
+  L.push(`  📉 Sell Price : ${fmt(nextSellPrice ?? sellPrice).padStart(12)}  denarii/grain`);
   L.push(`  😠 Anger      : ${fmt(updated.public_anger).padStart(12)}${arrow(updated.public_anger, state.public_anger)}  ${bar(updated.public_anger, 100)}`);
   L.push('═'.repeat(58));
 
   // Events — same wording as CLI
   if (updated._grainCapped)
     L.push(`\n  ⚠️  [Silo] Only ${fmt(state.grain_stored)} grain available — distribution capped.`);
+  if (orders.sellCapped)
+    L.push(`\n  📉 [Market] Only ${fmt(orders.sellAmount)} grain could be sold after reserving this year's distribution.`);
   if (updated._starved > 0)
     L.push(`\n  💀 [Famine] ${fmt(updated._starved)} plebs starved this year. The gods are displeased.`);
   for (const ev of updated._events) {
@@ -165,7 +169,7 @@ async function sendDispatch(to, state, updated, orders, grainPrice, nextGrainPri
     L.push(`  Watch for your new assignment letter from the Senate.`);
   } else {
     L.push(`\n  Enter your orders for Year ${toRoman(year + 1)}:`);
-    L.push('  TAX: [number]  GRAIN: [number]  BUY: [number](optional)');
+    L.push('  TAX: [number]  GRAIN: [number]  BUY: [number](optional)  SELL: [number](optional)');
   }
 
   await transporter.sendMail({ from: FROM, to, subject, text: L.join('\n') });
@@ -222,6 +226,7 @@ async function sendOrderError(to, playerName, rankTitle, originalBody) {
     '  TAX: [0-50]',
     '  GRAIN: [amount]',
     '  BUY: [amount]   (optional)',
+    '  SELL: [amount]  (optional)',
     '',
     'Example:',
     '  TAX: 10',

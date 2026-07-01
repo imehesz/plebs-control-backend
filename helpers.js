@@ -8,6 +8,17 @@ function randomGreeting() { return GREETINGS[Math.floor(Math.random() * GREETING
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 function fmt(n)    { return Math.round(n).toLocaleString('en-US'); }
 
+function rollGrainPrice() {
+  return Math.floor(Math.random() * 4) + 1;
+}
+
+// Sell price is always cheaper than the buy price rolled the same turn —
+// 10%-25% off, floored so it never rounds back up to the buy price.
+function rollSellPrice(buyPrice) {
+  const discount = 0.10 + Math.random() * 0.15;
+  return Math.max(1, Math.floor(buyPrice * (1 - discount)));
+}
+
 function arrow(curr, prev) {
   if (prev == null) return '  ';
   if (curr > prev) return ' ↑';
@@ -124,4 +135,4 @@ const CAESAR_ART = `
             |  ||
       ~ AVE, IMPERATOR! ~`;
 
-module.exports = { toRoman, randomGreeting, pick, fmt, arrow, bar, CITY_MAPS, CAESAR_ART };
+module.exports = { toRoman, randomGreeting, pick, fmt, arrow, bar, CITY_MAPS, CAESAR_ART, rollGrainPrice, rollSellPrice };

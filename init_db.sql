@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS users (
     pending_tax          INT,
     pending_grain        INT,
     pending_buy          INT          DEFAULT 0,
+    pending_sell         INT          DEFAULT 0,
     pending_tier         INT,
     pending_treasury     INT,
     PRIMARY KEY (id),
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS player_states (
     growth_streak    INT          NOT NULL DEFAULT 0,
     happy_streak     INT          NOT NULL DEFAULT 0,
     next_grain_price INT          NOT NULL DEFAULT 2,
+    next_grain_sell_price INT     NOT NULL DEFAULT 1,
     PRIMARY KEY (user_id),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
@@ -60,6 +62,7 @@ CREATE TABLE IF NOT EXISTS turn_history (
     grain_ordered  INT          NOT NULL,
     grain_actual   INT          NOT NULL,
     grain_bought   INT          NOT NULL DEFAULT 0,
+    grain_sold     INT          NOT NULL DEFAULT 0,
     pop_start      INT          NOT NULL,
     pop_end        INT          NOT NULL,
     starved        INT          NOT NULL DEFAULT 0,

@@ -117,12 +117,14 @@ async function handleInbound(payload) {
   const grainAmount = parseInt(grainMatch[1], 10);
   const buyMatch  = body.match(/BUY:\s*(\d+)/i);
   const buyAmount = buyMatch ? parseInt(buyMatch[1], 10) : 0;
+  const sellMatch  = body.match(/SELL:\s*(\d+)/i);
+  const sellAmount = sellMatch ? parseInt(sellMatch[1], 10) : 0;
 
   await dbRun(
-    `UPDATE users SET pending_tax = ?, pending_grain = ?, pending_buy = ? WHERE id = ?`,
-    [taxRate, grainAmount, buyAmount, user.id]
+    `UPDATE users SET pending_tax = ?, pending_grain = ?, pending_buy = ?, pending_sell = ? WHERE id = ?`,
+    [taxRate, grainAmount, buyAmount, sellAmount, user.id]
   );
-  console.log(`[inbound] orders stored for ${from}: TAX:${taxRate} GRAIN:${grainAmount} BUY:${buyAmount}`);
+  console.log(`[inbound] orders stored for ${from}: TAX:${taxRate} GRAIN:${grainAmount} BUY:${buyAmount} SELL:${sellAmount}`);
   return { status: 200, message: 'Orders received' };
 }
 
