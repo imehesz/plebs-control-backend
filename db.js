@@ -1,18 +1,32 @@
-const sqlite3 = require('sqlite3').verbose();
-const path    = require('path');
-const { DB_NAME } = require('./config');
+const mysql = require('mysql2/promise');
+const { DB_HOST, DB_USER, DB_PASS, DB_NAME } = require('./config');
 
-const db = new sqlite3.Database(path.join(__dirname, DB_NAME));
+const pool = mysql.createPool({
+  host:             DB_HOST,
+  user:             DB_USER,
+  password:         DB_PASS,
+  database:         DB_NAME,
+  waitForConnections: true,
+  connectionLimit:  10,
+});
 
-function dbGet(sql, p = []) {
-  return new Promise((res, rej) => db.get(sql, p, (e, r) => e ? rej(e) : res(r)));
+async function dbGet(sql, p = []) {
+  const [rows] = await pool.query(sql, p);
+  return rows[0];
 }
-function dbAll(sql, p = []) {
-  return new Promise((res, rej) => db.all(sql, p, (e, r) => e ? rej(e) : res(r)));
+
+async function dbAll(sql, p = []) {
+  const [rows] = await pool.query(sql, p);
+  return rows;
 }
-function dbRun(sql, p = []) {
-  return new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this); }));
+
+async function dbRun(sql, p = []) {
+  const [result] = await pool.query(sql, p);
+  return result;
 }
-function close() { db.close(); }
+
+async function close() {
+  await pool.end();
+}
 
 module.exports = { dbGet, dbAll, dbRun, close };

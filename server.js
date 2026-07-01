@@ -1,5 +1,6 @@
 const http = require('http');
-const { sendWelcome, sendOrderError } = require('./mailer');
+const crypto = require('crypto');
+const { sendWelcome, sendOrderError, sendVerification } = require('./mailer');
 const { PORT } = require('./config');
 const { dbGet, dbAll, dbRun } = require('./db');
 
@@ -20,7 +21,7 @@ function stripReply(text) {
 async function handleAccept(user) {
   const levelConfig = await dbGet('SELECT * FROM level_config WHERE level_id = 1');
   const cityRow = await dbGet(
-    'SELECT name FROM city_names WHERE tier = 1 ORDER BY RANDOM() LIMIT 1'
+    'SELECT name FROM city_names WHERE tier = 1 ORDER BY RAND() LIMIT 1'
   );
   const cityName = cityRow ? cityRow.name : 'Vindolanda';
 
@@ -29,7 +30,7 @@ async function handleAccept(user) {
     [user.id]
   );
   await dbRun(
-    `INSERT OR IGNORE INTO player_states
+    `INSERT IGNORE INTO player_states
        (user_id, city_name, population, treasury, grain_stored, public_anger)
      VALUES (?, ?, ?, ?, ?, ?)`,
     [user.id, cityName, levelConfig.start_population, levelConfig.start_treasury,
@@ -45,7 +46,7 @@ async function handleNewAssignment(user) {
   const tier = user.pending_tier;
   const lc   = await dbGet('SELECT * FROM level_config WHERE level_id = ?', [tier]);
   const cityRow = await dbGet(
-    'SELECT name FROM city_names WHERE tier = ? ORDER BY RANDOM() LIMIT 1', [tier]
+    'SELECT name FROM city_names WHERE tier = ? ORDER BY RAND() LIMIT 1', [tier]
   );
   const cityName = cityRow ? cityRow.name : `City`;
   const treasury = user.pending_treasury !== null && user.pending_treasury !== undefined
@@ -125,6 +126,43 @@ async function handleInbound(payload) {
   return { status: 200, message: 'Orders received' };
 }
 
+// Requires a local part, an "@", a domain label, and a TLD of at least 2
+// letters — rejects junk like "blah@.com" or "blah@bad" while staying
+// simple (no claim to full RFC 5322 compliance).
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/;
+
+async function handleSignup(payload) {
+  const email = String(payload.email || '').trim().toLowerCase();
+  const playerName = String(payload.name || '').trim();
+  let deliveryHour = parseInt(payload.deliveryHour, 10);
+  if (!(deliveryHour >= 0 && deliveryHour <= 23)) deliveryHour = 12;
+
+  if (!playerName) {
+    return { status: 400, message: 'A name is required.' };
+  }
+  if (!EMAIL_RE.test(email)) {
+    return { status: 400, message: 'That does not look like a valid email address.' };
+  }
+
+  const existing = await dbGet('SELECT id FROM users WHERE LOWER(email) = ?', [email]);
+  if (existing) {
+    return { status: 409, message: 'A player with that email already exists.' };
+  }
+
+  const token = crypto.randomBytes(16).toString('hex');
+  const expires = Date.now() + 24 * 60 * 60 * 1000;
+
+  await dbRun(
+    `INSERT INTO users (email, player_name, delivery_hour_utc, verified, verification_token, verification_expires)
+     VALUES (?, ?, ?, 0, ?, ?)`,
+    [email, playerName, deliveryHour, token, expires]
+  );
+
+  await sendVerification(email, playerName);
+  console.log(`[signup] ${email} (${playerName}) → verification sent`);
+  return { status: 200, message: 'Verification email sent — check your inbox.' };
+}
+
 function setCORS(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -160,6 +198,24 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && req.url === '/api/signup') {
+    let signupBody = '';
+    req.on('data', chunk => { signupBody += chunk; });
+    req.on('end', async () => {
+      setCORS(res);
+      try {
+        const payload = JSON.parse(signupBody);
+        const result = await handleSignup(payload);
+        res.writeHead(result.status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ message: result.message }));
+      } catch (err) {
+        console.error('[signup] error:', err);
+        res.writeHead(500); res.end('Error');
+      }
+    });
+    return;
+  }
+
   if (req.method !== 'POST' || req.url !== '/inbound') {
     res.writeHead(404); res.end('Not found'); return;
   }
@@ -183,7 +239,7 @@ const server = http.createServer(async (req, res) => {
         };
       }
       const result = await handleInbound(payload);
-      res.writeHead(result.status, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
     } catch (err) {
       console.error('[inbound] error:', err);
@@ -192,6 +248,6 @@ const server = http.createServer(async (req, res) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '127.0.0.1', () => {
   console.log(`[server] Inbound webhook listening on http://localhost:${PORT}/inbound`);
 });

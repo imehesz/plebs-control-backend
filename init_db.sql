@@ -1,84 +1,90 @@
--- Plebs Control — full DB init
--- Safe to re-run: all inserts use OR IGNORE
+-- Plebs Control — full DB init (MySQL)
+-- Safe to re-run: all inserts use INSERT IGNORE
 
 -- ── TABLES ────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS level_config (
-    level_id           INTEGER PRIMARY KEY,
-    rank_title         VARCHAR NOT NULL,
-    term_years         INTEGER NOT NULL,
-    start_population   INTEGER NOT NULL,
-    start_grain        INTEGER NOT NULL,
-    start_treasury     INTEGER NOT NULL,
-    start_anger        INTEGER NOT NULL,
-    harvest_multiplier INTEGER NOT NULL DEFAULT 4,
-    disaster_risk      FLOAT   NOT NULL DEFAULT 0.0,
-    growth_threshold   INTEGER NOT NULL DEFAULT 22
-);
+    level_id           INT         NOT NULL,
+    rank_title         VARCHAR(50) NOT NULL,
+    term_years         INT         NOT NULL,
+    start_population   INT         NOT NULL,
+    start_grain        INT         NOT NULL,
+    start_treasury     INT         NOT NULL,
+    start_anger        INT         NOT NULL,
+    harvest_multiplier INT         NOT NULL DEFAULT 4,
+    disaster_risk      FLOAT       NOT NULL DEFAULT 0.0,
+    growth_threshold   INT         NOT NULL DEFAULT 22,
+    PRIMARY KEY (level_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
 CREATE TABLE IF NOT EXISTS users (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    email                TEXT    UNIQUE NOT NULL,
-    player_name          TEXT    NOT NULL,
-    delivery_hour_utc    INTEGER NOT NULL DEFAULT 12,
-    verified             BOOLEAN NOT NULL DEFAULT 0,
-    current_tier         INTEGER NOT NULL DEFAULT 1,
-    day_in_tier          INTEGER NOT NULL DEFAULT 1,
-    verification_token   TEXT,
-    verification_expires INTEGER,
-    pending_tax          INTEGER,
-    pending_grain        INTEGER,
-    pending_buy          INTEGER DEFAULT 0,
-    pending_tier         INTEGER,
-    pending_treasury     INTEGER
-);
+    id                   INT          NOT NULL AUTO_INCREMENT,
+    email                VARCHAR(255) NOT NULL,
+    player_name          VARCHAR(255) NOT NULL,
+    delivery_hour_utc    INT          NOT NULL DEFAULT 12,
+    verified             TINYINT(1)   NOT NULL DEFAULT 0,
+    current_tier         INT          NOT NULL DEFAULT 1,
+    day_in_tier          INT          NOT NULL DEFAULT 1,
+    verification_token   VARCHAR(255),
+    verification_expires BIGINT,
+    pending_tax          INT,
+    pending_grain        INT,
+    pending_buy          INT          DEFAULT 0,
+    pending_tier         INT,
+    pending_treasury     INT,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
 CREATE TABLE IF NOT EXISTS player_states (
-    user_id          INTEGER PRIMARY KEY,
-    city_name        TEXT    NOT NULL,
-    population       INTEGER NOT NULL DEFAULT 1000,
-    treasury         INTEGER NOT NULL DEFAULT 0,
-    grain_stored     INTEGER NOT NULL DEFAULT 25000,
-    public_anger     INTEGER NOT NULL DEFAULT 20,
-    growth_streak    INTEGER NOT NULL DEFAULT 0,
-    happy_streak     INTEGER NOT NULL DEFAULT 0,
-    next_grain_price INTEGER NOT NULL DEFAULT 2,
+    user_id          INT          NOT NULL,
+    city_name        VARCHAR(100) NOT NULL,
+    population       INT          NOT NULL DEFAULT 1000,
+    treasury         INT          NOT NULL DEFAULT 0,
+    grain_stored     INT          NOT NULL DEFAULT 25000,
+    public_anger     INT          NOT NULL DEFAULT 20,
+    growth_streak    INT          NOT NULL DEFAULT 0,
+    happy_streak     INT          NOT NULL DEFAULT 0,
+    next_grain_price INT          NOT NULL DEFAULT 2,
+    PRIMARY KEY (user_id),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
 CREATE TABLE IF NOT EXISTS turn_history (
-    id             INTEGER  PRIMARY KEY AUTOINCREMENT,
-    user_id        INTEGER  NOT NULL,
-    city_name      TEXT     NOT NULL,
-    tier           INTEGER  NOT NULL,
-    year_in_tier   INTEGER  NOT NULL,
-    tax_rate       INTEGER  NOT NULL,
-    grain_ordered  INTEGER  NOT NULL,
-    grain_actual   INTEGER  NOT NULL,
-    grain_bought   INTEGER  NOT NULL DEFAULT 0,
-    pop_start      INTEGER  NOT NULL,
-    pop_end        INTEGER  NOT NULL,
-    starved        INTEGER  NOT NULL DEFAULT 0,
-    treasury_start INTEGER  NOT NULL,
-    treasury_end   INTEGER  NOT NULL,
-    grain_start    INTEGER  NOT NULL,
-    grain_end      INTEGER  NOT NULL,
-    anger_start    INTEGER  NOT NULL,
-    anger_end      INTEGER  NOT NULL,
-    events         TEXT     NOT NULL DEFAULT '[]',
-    created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    id             INT          NOT NULL AUTO_INCREMENT,
+    user_id        INT          NOT NULL,
+    city_name      VARCHAR(100) NOT NULL,
+    tier           INT          NOT NULL,
+    year_in_tier   INT          NOT NULL,
+    tax_rate       INT          NOT NULL,
+    grain_ordered  INT          NOT NULL,
+    grain_actual   INT          NOT NULL,
+    grain_bought   INT          NOT NULL DEFAULT 0,
+    pop_start      INT          NOT NULL,
+    pop_end        INT          NOT NULL,
+    starved        INT          NOT NULL DEFAULT 0,
+    treasury_start INT          NOT NULL,
+    treasury_end   INT          NOT NULL,
+    grain_start    INT          NOT NULL,
+    grain_end      INT          NOT NULL,
+    anger_start    INT          NOT NULL,
+    anger_end      INT          NOT NULL,
+    events         TEXT         NOT NULL,
+    created_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
 CREATE TABLE IF NOT EXISTS city_names (
-    id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    tier INTEGER NOT NULL,
-    name TEXT    NOT NULL
-);
+    id   INT         NOT NULL AUTO_INCREMENT,
+    tier INT         NOT NULL,
+    name VARCHAR(100) NOT NULL,
+    PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
 -- ── LEVEL CONFIG ──────────────────────────────────────────────────────────────
---                     id  rank          yrs   pop      grain     treas   ang  harv  disaster  growth
-INSERT OR IGNORE INTO level_config VALUES
+--                    id  rank          yrs   pop      grain     treas   ang  harv  disaster  growth
+INSERT IGNORE INTO level_config VALUES
 (1, 'Duumvir',     5,   1000,    75000,       0, 10, 10, 0.00, 22),
 (2, 'Aedile',     10,  10000,   600000,    5000, 10, 12, 0.00, 22),
 (3, 'Praetor',    10,  50000,  2500000,   25000, 10,  8, 0.02, 22),
@@ -89,7 +95,7 @@ INSERT OR IGNORE INTO level_config VALUES
 
 -- ── CITY NAMES (20 per tier × 7 tiers) ───────────────────────────────────────
 
-INSERT OR IGNORE INTO city_names (tier, name) VALUES
+INSERT IGNORE INTO city_names (tier, name) VALUES
 -- L1: Britannia
 (1,'Vindolanda'),(1,'Novaesium'),(1,'Eburacum'),(1,'Deva'),(1,'Lindum'),
 (1,'Corinium'),(1,'Calleva'),(1,'Durovernum'),(1,'Camulodunum'),(1,'Isca'),

@@ -8,6 +8,6 @@
   },
   "dependencies": {
     "nodemailer": "^9.0.1",
-    "sqlite3": "^5.1.7"
+    "mysql2": "^3.11.0"
   }
 }
