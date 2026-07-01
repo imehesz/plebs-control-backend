@@ -1,7 +1,9 @@
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
 const { sendWelcome, sendOrderError, sendVerification } = require('./mailer');
-const { PORT } = require('./config');
+const { PORT, ADMIN_USER, ADMIN_PASS } = require('./config');
 const { dbGet, dbAll, dbRun } = require('./db');
 
 // Strip quoted reply content — drop lines starting with '>' and everything after 'On ... wrote:'
@@ -187,9 +189,164 @@ async function handleLegions(res) {
   res.end(JSON.stringify(payload));
 }
 
+// ── Read-only admin dashboard ────────────────────────────────────────────────
+// Table names below are a fixed whitelist, never taken from the request —
+// only their validated keys ever reach a query string.
+const ADMIN_PAGE_SIZE = 50;
+const ADMIN_TABLES = {
+  users: {
+    label: 'Users', orderBy: 'id DESC',
+    columns: ['id', 'email', 'player_name', 'delivery_hour_utc', 'verified', 'current_tier',
+      'day_in_tier', 'verification_token', 'verification_expires', 'pending_tax', 'pending_grain',
+      'pending_buy', 'pending_sell', 'pending_tier', 'pending_treasury'],
+  },
+  player_states: {
+    label: 'Player States', orderBy: 'user_id DESC',
+    columns: ['user_id', 'city_name', 'population', 'treasury', 'grain_stored', 'public_anger',
+      'growth_streak', 'happy_streak', 'next_grain_price', 'next_grain_sell_price'],
+  },
+  turn_history: {
+    label: 'Turn History', orderBy: 'id DESC',
+    columns: ['id', 'user_id', 'city_name', 'tier', 'year_in_tier', 'tax_rate', 'grain_ordered',
+      'grain_actual', 'grain_bought', 'grain_sold', 'pop_start', 'pop_end', 'starved',
+      'treasury_start', 'treasury_end', 'grain_start', 'grain_end', 'anger_start', 'anger_end',
+      'events', 'created_at'],
+  },
+  level_config: {
+    label: 'Level Config', orderBy: 'level_id ASC',
+    columns: ['level_id', 'rank_title', 'term_years', 'start_population', 'start_grain',
+      'start_treasury', 'start_anger', 'harvest_multiplier', 'disaster_risk', 'growth_threshold'],
+  },
+  city_names: {
+    label: 'City Names', orderBy: 'id ASC',
+    columns: ['id', 'tier', 'name'],
+  },
+};
+
+// Maps sortable player-view column names to their qualified SQL column —
+// only keys in this map are ever accepted as a sort column.
+const PLAYERS_SORT_COLUMNS = {
+  id: 'u.id', email: 'u.email', player_name: 'u.player_name', verified: 'u.verified',
+  current_tier: 'u.current_tier', rank_title: 'lc.rank_title', day_in_tier: 'u.day_in_tier',
+  city_name: 'ps.city_name', population: 'ps.population', treasury: 'ps.treasury',
+  grain_stored: 'ps.grain_stored', public_anger: 'ps.public_anger', pending_tax: 'u.pending_tax',
+  pending_grain: 'u.pending_grain', pending_buy: 'u.pending_buy', pending_sell: 'u.pending_sell',
+  pending_tier: 'u.pending_tier',
+};
+
+function resolveOrderBy(sortColumns, sortCol, sortDir, defaultOrderBy) {
+  const dir = sortDir === 'desc' ? 'DESC' : sortDir === 'asc' ? 'ASC' : null;
+  if (dir && sortCol && Object.prototype.hasOwnProperty.call(sortColumns, sortCol)) {
+    return `${sortColumns[sortCol]} ${dir}`;
+  }
+  return defaultOrderBy;
+}
+
+function checkAdminAuth(req) {
+  if (!ADMIN_USER || !ADMIN_PASS) return false;
+  const header = req.headers['authorization'] || '';
+  const [scheme, encoded] = header.split(' ');
+  if (scheme !== 'Basic' || !encoded) return false;
+  let decoded;
+  try { decoded = Buffer.from(encoded, 'base64').toString('utf8'); } catch { return false; }
+  const idx = decoded.indexOf(':');
+  if (idx === -1) return false;
+  const user = Buffer.from(decoded.slice(0, idx));
+  const pass = Buffer.from(decoded.slice(idx + 1));
+  const expectedUser = Buffer.from(ADMIN_USER);
+  const expectedPass = Buffer.from(ADMIN_PASS);
+  const userOk = user.length === expectedUser.length && crypto.timingSafeEqual(user, expectedUser);
+  const passOk = pass.length === expectedPass.length && crypto.timingSafeEqual(pass, expectedPass);
+  return userOk && passOk;
+}
+
+function requireAdminAuth(req, res) {
+  if (checkAdminAuth(req)) return true;
+  res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Plebs Control Admin"' });
+  res.end('Authentication required');
+  return false;
+}
+
+async function handleAdminPlayers(res, page, sortCol, sortDir) {
+  const offset = (page - 1) * ADMIN_PAGE_SIZE;
+  const orderBy = resolveOrderBy(PLAYERS_SORT_COLUMNS, sortCol, sortDir, 'u.id DESC');
+  const totalRow = await dbGet('SELECT COUNT(*) AS c FROM users');
+  const rows = await dbAll(
+    `SELECT u.id, u.email, u.player_name, u.verified, u.current_tier, lc.rank_title,
+            u.day_in_tier, ps.city_name, ps.population, ps.treasury, ps.grain_stored,
+            ps.public_anger, u.pending_tax, u.pending_grain, u.pending_buy, u.pending_sell,
+            u.pending_tier
+     FROM users u
+     LEFT JOIN player_states ps ON ps.user_id = u.id
+     LEFT JOIN level_config lc  ON lc.level_id = u.current_tier
+     ORDER BY ${orderBy}
+     LIMIT ? OFFSET ?`,
+    [ADMIN_PAGE_SIZE, offset]
+  );
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ rows, page, pageSize: ADMIN_PAGE_SIZE, total: totalRow.c }));
+}
+
+async function handleAdminTable(res, name, page, sortCol, sortDir) {
+  const table = ADMIN_TABLES[name];
+  if (!table) { res.writeHead(404); res.end('Unknown table'); return; }
+  const sortColumns = Object.fromEntries(table.columns.map(c => [c, c]));
+  const orderBy = resolveOrderBy(sortColumns, sortCol, sortDir, table.orderBy);
+  const offset = (page - 1) * ADMIN_PAGE_SIZE;
+  const totalRow = await dbGet(`SELECT COUNT(*) AS c FROM ${name}`);
+  const rows = await dbAll(
+    `SELECT * FROM ${name} ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
+    [ADMIN_PAGE_SIZE, offset]
+  );
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ rows, page, pageSize: ADMIN_PAGE_SIZE, total: totalRow.c }));
+}
+
+async function handleAdminRequest(req, res, pathname, page, sortCol, sortDir) {
+  if (!requireAdminAuth(req, res)) return;
+
+  if (pathname === '/api/admin') {
+    try {
+      const html = fs.readFileSync(path.join(__dirname, 'admin.html'), 'utf8');
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(html);
+    } catch (e) {
+      console.error('[admin]', e);
+      res.writeHead(500); res.end('Error');
+    }
+    return;
+  }
+
+  if (pathname === '/api/admin/players') {
+    try { await handleAdminPlayers(res, page, sortCol, sortDir); } catch (e) {
+      console.error('[admin]', e); res.writeHead(500); res.end('Error');
+    }
+    return;
+  }
+
+  const tableMatch = pathname.match(/^\/api\/admin\/table\/([a-z_]+)$/);
+  if (tableMatch) {
+    try { await handleAdminTable(res, tableMatch[1], page, sortCol, sortDir); } catch (e) {
+      console.error('[admin]', e); res.writeHead(500); res.end('Error');
+    }
+    return;
+  }
+
+  res.writeHead(404); res.end('Not found');
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     setCORS(res); res.writeHead(204); res.end(); return;
+  }
+
+  if (req.method === 'GET' && req.url.startsWith('/api/admin')) {
+    const u = new URL(req.url, 'http://localhost');
+    const page = Math.max(1, parseInt(u.searchParams.get('page'), 10) || 1);
+    const sortCol = u.searchParams.get('sort');
+    const sortDir = u.searchParams.get('dir');
+    await handleAdminRequest(req, res, u.pathname, page, sortCol, sortDir);
+    return;
   }
 
   if (req.method === 'GET' && req.url === '/api/legions') {

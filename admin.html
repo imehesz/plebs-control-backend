@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Plebs Control — Admin</title>
+<style>
+  body { font-family: 'Courier New', monospace; background: #1a1410; color: #e8ddc7; margin: 0; padding: 20px; }
+  h1 { color: #c9a227; margin: 0 0 4px; }
+  .subtitle { color: #8a7a5c; margin-bottom: 20px; font-size: 13px; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+  .tab { background: #2a2218; border: 1px solid #4a3c28; color: #e8ddc7; padding: 6px 14px; cursor: pointer; font-family: inherit; font-size: 13px; }
+  .tab:hover { background: #3a2f20; }
+  .tab.active { background: #c9a227; color: #1a1410; border-color: #c9a227; font-weight: bold; }
+  #table-container { overflow-x: auto; border: 1px solid #4a3c28; min-height: 100px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; white-space: nowrap; }
+  th, td { border: 1px solid #4a3c28; padding: 6px 10px; text-align: left; }
+  th { background: #2a2218; color: #c9a227; position: sticky; top: 0; cursor: pointer; user-select: none; }
+  th:hover { background: #3a2f20; }
+  th .arrow { color: #e8ddc7; margin-left: 4px; }
+  tr:nth-child(even) { background: #221c14; }
+  .null { color: #6a5c48; font-style: italic; }
+  .loading, .empty, .error { padding: 16px; color: #8a7a5c; }
+  .error { color: #c96227; }
+  .pagination { display: flex; align-items: center; gap: 12px; margin-top: 12px; font-size: 13px; }
+  .pagination button { background: #2a2218; border: 1px solid #4a3c28; color: #e8ddc7; padding: 5px 12px; cursor: pointer; font-family: inherit; }
+  .pagination button:disabled { opacity: 0.4; cursor: default; }
+  .pagination button:not(:disabled):hover { background: #3a2f20; }
+</style>
+</head>
+<body>
+  <h1>SPQR — Admin</h1>
+  <div class="subtitle">Read-only database viewer</div>
+  <div class="tabs" id="tabs"></div>
+  <div id="table-container"><p class="loading">Loading…</p></div>
+  <div class="pagination">
+    <button id="prev-btn">&larr; Prev</button>
+    <span id="page-info"></span>
+    <button id="next-btn">Next &rarr;</button>
+  </div>
+
+<script>
+const TABS = [
+  { key: 'players',       label: 'Players',       url: '/api/admin/players' },
+  { key: 'users',         label: 'Users',         url: '/api/admin/table/users' },
+  { key: 'player_states', label: 'Player States', url: '/api/admin/table/player_states' },
+  { key: 'turn_history',  label: 'Turn History',  url: '/api/admin/table/turn_history' },
+  { key: 'level_config',  label: 'Level Config',  url: '/api/admin/table/level_config' },
+  { key: 'city_names',    label: 'City Names',    url: '/api/admin/table/city_names' },
+];
+
+let currentTab = TABS[0];
+let currentPage = 1;
+let currentSort = null;
+let currentDir = 'asc';
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+
+function formatCell(v) {
+  if (v === null || v === undefined) return '<span class="null">null</span>';
+  let s = String(v);
+  if (s.length > 200) s = s.slice(0, 200) + '…';
+  return escapeHtml(s);
+}
+
+function renderTabs() {
+  const el = document.getElementById('tabs');
+  el.innerHTML = TABS.map(t =>
+    `<button class="tab${t.key === currentTab.key ? ' active' : ''}" data-key="${t.key}">${t.label}</button>`
+  ).join('');
+  el.querySelectorAll('.tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tab = TABS.find(t => t.key === btn.dataset.key);
+      currentSort = null;
+      currentDir = 'asc';
+      loadTab(tab, 1);
+    });
+  });
+}
+
+function sortByColumn(col) {
+  if (currentSort === col) {
+    currentDir = currentDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    currentSort = col;
+    currentDir = 'asc';
+  }
+  loadTab(currentTab, 1);
+}
+
+function renderTable(data) {
+  const { rows, page, pageSize, total } = data;
+  const container = document.getElementById('table-container');
+  if (!rows.length) {
+    container.innerHTML = '<p class="empty">No rows.</p>';
+  } else {
+    const cols = Object.keys(rows[0]);
+    let html = '<table><thead><tr>' + cols.map(c => {
+      const arrow = c === currentSort ? `<span class="arrow">${currentDir === 'asc' ? '▲' : '▼'}</span>` : '';
+      return `<th data-col="${escapeHtml(c)}">${escapeHtml(c)}${arrow}</th>`;
+    }).join('') + '</tr></thead><tbody>';
+    for (const row of rows) {
+      html += '<tr>' + cols.map(c => `<td>${formatCell(row[c])}</td>`).join('') + '</tr>';
+    }
+    html += '</tbody></table>';
+    container.innerHTML = html;
+    container.querySelectorAll('th').forEach(th => {
+      th.addEventListener('click', () => sortByColumn(th.dataset.col));
+    });
+  }
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  document.getElementById('page-info').textContent = `Page ${page} of ${totalPages} (${total} rows)`;
+  document.getElementById('prev-btn').disabled = page <= 1;
+  document.getElementById('next-btn').disabled = page >= totalPages;
+}
+
+async function loadTab(tab, page) {
+  currentTab = tab;
+  currentPage = page;
+  renderTabs();
+  const container = document.getElementById('table-container');
+  container.innerHTML = '<p class="loading">Loading…</p>';
+  try {
+    let url = `${tab.url}?page=${page}`;
+    if (currentSort) url += `&sort=${encodeURIComponent(currentSort)}&dir=${currentDir}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    renderTable(data);
+  } catch (e) {
+    container.innerHTML = `<p class="error">Failed to load: ${e.message}</p>`;
+  }
+}
+
+document.getElementById('prev-btn').addEventListener('click', () => {
+  if (currentPage > 1) loadTab(currentTab, currentPage - 1);
+});
+document.getElementById('next-btn').addEventListener('click', () => {
+  loadTab(currentTab, currentPage + 1);
+});
+
+renderTabs();
+loadTab(currentTab, 1);
+</script>
+</body>
+</html>
