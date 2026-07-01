@@ -11,6 +11,19 @@ const transporter = nodemailer.createTransport({
 
 const FROM = '"Plebs Control — Cursus Publicus" <dispatch@plebscontrol.com>';
 
+// "-- " on its own line is the standard signature delimiter (also what
+// stripReply in server.js looks for to drop quoted content from replies).
+const SIGNATURE = [
+  '',
+  '-- ',
+  '🏛️  Roma is always open at: https://PlebsControl.com/',
+  '💬  Trade strategy with fellow governors in the Forum Romanum: https://discord.com/channels/1521497901874806795/1521497903334555699',
+].join('\n');
+
+async function send(mailOptions) {
+  return transporter.sendMail({ ...mailOptions, text: mailOptions.text + '\n' + SIGNATURE });
+}
+
 async function sendVerification(to, playerName) {
   const subject = 'Plebs Control — Confirm Your Senatorial Appointment';
   const text = [
@@ -38,7 +51,7 @@ async function sendVerification(to, playerName) {
     '══════════════════════════════════════════════════',
   ].join('\n');
 
-  await transporter.sendMail({ from: FROM, to, subject, text });
+  await send({ from: FROM, to, subject, text });
 }
 
 async function sendWelcome(to, playerName, rankTitle, cityName, dispatchTime = '08:00 UTC') {
@@ -63,7 +76,7 @@ async function sendWelcome(to, playerName, rankTitle, cityName, dispatchTime = '
     '══════════════════════════════════════════════════',
   ].join('\n');
 
-  await transporter.sendMail({ from: FROM, to, subject, text });
+  await send({ from: FROM, to, subject, text });
 }
 
 async function sendYearOneDispatch(to, state, grainPrice = 2, sellPrice = 1) {
@@ -95,7 +108,7 @@ async function sendYearOneDispatch(to, state, grainPrice = 2, sellPrice = 1) {
     '  TAX: [number]  GRAIN: [number]  BUY: [number](optional)  SELL: [number](optional)',
   ];
 
-  await transporter.sendMail({ from: FROM, to, subject, text: L.join('\n') });
+  await send({ from: FROM, to, subject, text: L.join('\n') });
 }
 
 
@@ -172,7 +185,7 @@ async function sendDispatch(to, state, updated, orders, grainPrice, nextGrainPri
     L.push('  TAX: [number]  GRAIN: [number]  BUY: [number](optional)  SELL: [number](optional)');
   }
 
-  await transporter.sendMail({ from: FROM, to, subject, text: L.join('\n') });
+  await send({ from: FROM, to, subject, text: L.join('\n') });
 }
 
 async function sendAssignment(to, playerName, rankTitle, reason) {
@@ -205,7 +218,7 @@ async function sendAssignment(to, playerName, rankTitle, reason) {
     '══════════════════════════════════════════════════',
   ].join('\n');
 
-  await transporter.sendMail({ from: FROM, to, subject, text });
+  await send({ from: FROM, to, subject, text });
 }
 
 async function sendOrderError(to, playerName, rankTitle, originalBody) {
@@ -243,7 +256,7 @@ async function sendOrderError(to, playerName, rankTitle, originalBody) {
     '══════════════════════════════════════════════════',
   ].join('\n');
 
-  await transporter.sendMail({ from: FROM, to, subject, text });
+  await send({ from: FROM, to, subject, text });
 }
 
 module.exports = { sendVerification, sendWelcome, sendYearOneDispatch, sendDispatch, sendAssignment, sendOrderError };
